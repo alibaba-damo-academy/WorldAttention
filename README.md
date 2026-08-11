@@ -4,6 +4,8 @@
 
 <h1 align="center">WorldAttention: An Efficient Attention Architecture for Interactive Video World Models</h1>
 
+<!-- <h3 align="center">2026</h3> -->
+
 <p align="center">
   <a href="#"><img src="https://img.shields.io/badge/Paper-B31B1B?style=for-the-badge&logo=arxiv&logoColor=white" alt="Paper"></a>
   <a href="#"><img src="https://img.shields.io/badge/Project%20Page-000000?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Project Page"></a>
