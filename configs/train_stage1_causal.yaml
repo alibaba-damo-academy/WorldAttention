@@ -1,0 +1,67 @@
+# Stage 1 - causal adaptation.
+#
+# Distill the pretrained bidirectional Wan2.1-T2V-1.3B into a 4-step causal student with
+# self-forcing DMD. Dense attention throughout: the rollout uses no KV cache, so HSA is inactive.
+#
+#   torchrun --nproc_per_node=8 train.py --config_path configs/train_stage1_causal.yaml --logdir logs_stage1
+
+generator_ckpt: models/ode_init.pt
+allow_partial_generator_ckpt: true   # the checkpoint predates the HSA parameters
+
+real_name: Wan2.1-T2V-1.3B
+fake_name: Wan2.1-T2V-1.3B
+generator_fsdp_wrap_strategy: size
+real_score_fsdp_wrap_strategy: size
+fake_score_fsdp_wrap_strategy: size
+text_encoder_fsdp_wrap_strategy: size
+sharding_strategy: hybrid_full
+
+denoising_step_list: [1000, 750, 500, 250]
+warp_denoising_step: true
+ts_schedule: false
+num_train_timestep: 1000
+timestep_shift: 5.0
+guidance_scale: 3.0
+denoising_loss_type: flow
+mixed_precision: true
+seed: 0
+
+distribution_loss: dmd
+trainer: score_distillation
+gradient_checkpointing: true
+num_frame_per_block: 3
+load_raw_video: false
+model_kwargs:
+  timestep_shift: 5.0
+  local_attn_size: 12
+  sink_size: 3
+
+lr: 2.0e-06
+lr_critic: 4.0e-07
+beta1: 0.0
+beta2: 0.999
+beta1_critic: 0.0
+beta2_critic: 0.999
+batch_size: 1
+gradient_accumulation_steps: 1
+dfake_gen_update_ratio: 5
+ema_weight: 0.99
+ema_start_step: 200
+max_iters: 700
+log_iters: 100
+max_checkpoints: 5
+
+data_path: prompts/train_prompts.txt
+val_data_path: prompts/train_prompts.txt
+image_or_video_shape: [1, 21, 16, 60, 104]
+min_num_training_frames: 21
+num_training_frames: 21
+slice_last_frames: 21
+
+vis_interval: 200
+vis_ema: false
+vis_video_lengths: [21]
+val_batch_size: 1
+disable_wandb: true
+
+negative_prompt: '色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走'

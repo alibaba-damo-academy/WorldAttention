@@ -44,9 +44,83 @@ _We propose a system-oriented co-design using Hierarchical KV Cache (HKV) for co
 
 ## To-Do List
 
-- [ ] Release the paper on arXiv
-- [ ] Build the project page
-- [ ] Release the code
+- [x] Release the paper on arXiv
+- [x] Build the project page
+- [x] Release the core code
+- [ ] Release the inference pipeline
 - [ ] Release the HSA kernels
 - [ ] Release the visualization script
 - [ ] Release the demo
+
+## Intro
+
+Leveraging the paradigm of autoregressive diffusion, text-conditioned interactive video world models
+aim to simulate temporally coherent environments guided by textual instructions. While enabling
+low-latency, long-duration generation is pivotal for embodied AI and simulation-based planning,
+current frameworks primarily rely on sliding-window mechanisms to bound computational complexity.
+However, this approach inherently sacrifices historical context, undermining the long-range
+interactive capabilities. Conversely, maintaining a full-history cache remains computationally
+prohibitive and memory-intensive: the quadratic complexity of attention leads to excessive
+computational overhead, while the linear growth of the KV cache inevitably leads to GPU memory
+saturation. To overcome these limitations, we propose **WorldAttention**, a system-aware attention
+architecture that achieves high efficiency through the co-design of specialized attention kernels
+and hierarchical KV cache management. First, we introduce **Hybrid Sparse Attention (HSA)**, which
+integrates linear global attention supplemented with head-adaptive sparse attention. Additionally,
+we design a **Hierarchical KV Cache (HKV)** that organizes historical KV pairs into semantically
+indexed pages across multi-tier memory, enabling fine-grained retrieval and controlled GPU
+residency. These two designs are supported by tailored kernels to effectively translate their
+theoretical efficiency into real-world performance. Extensive experiments on VBench-Long and
+InterVBench demonstrate that WorldAttention consistently surpasses prior state-of-the-art methods,
+achieving subject consistency scores of 0.9472 on VBench-Long and 0.9668 on InterVBench,
+respectively. Our system-oriented kernel design for HSA brings a 14.02× speedup over
+FlashAttention-3, and a 2.21× end-to-end speed up together with HKV. At inference, WorldAttention
+sustains 22.0 FPS on a single NVIDIA H100.
+
+## News
+
+## Quick Start
+
+### Environment
+
+```bash
+git clone https://github.com/alibaba-damo-academy/WorldAttention.git
+cd WorldAttention
+
+conda create -n worldattention python=3.10 -y
+conda activate worldattention
+pip install -r requirements.txt
+```
+
+`triton` is optional. It enables the Triton block-sparse backend for the HSA sparse branch.
+
+### Training
+
+Three stages, each resuming from the previous one's checkpoint:
+
+```bash
+# Stage 1 - adapt the bidirectional model into a 4-step causal student (dense attention)
+torchrun --nproc_per_node=8 train.py \
+  --config_path configs/train_stage1_causal.yaml --logdir logs_stage1
+
+# Stage 2 - HSA warmup: base frozen, HSA parameters trained by attention self-distillation
+torchrun --nproc_per_node=8 train.py \
+  --config_path configs/train_stage2_hsa_warmup.yaml --logdir logs_stage2
+
+# Stage 3 - HSA tune: streaming prompt-switch distillation with HSA active
+torchrun --nproc_per_node=8 train.py \
+  --config_path configs/train_stage3_hsa_tune.yaml --logdir logs_stage3
+```
+
+Model weights are read from `models/` by default, and prompt lists from `prompts/`.
+
+## Citation
+
+```bibtex
+@article{zhang2026worldattention,
+  title   = {WorldAttention: An Efficient Attention Architecture for Interactive Video World Models},
+  author  = {Zhang, Zeyu and Mao, Jinyuan and An, Dakai and Zhao, Wangbo and Lu, Hanfeng and
+             Tang, Jiasheng and Yu, Yinghao and Wang, Wei and Zhuang, Bohan},
+  journal = {arXiv preprint arXiv:XXXX.XXXXX},
+  year    = {2026}
+}
+```

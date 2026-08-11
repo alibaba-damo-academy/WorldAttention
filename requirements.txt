@@ -1,0 +1,27 @@
+torch>=2.4
+torchvision
+diffusers==0.31.0
+transformers==4.49.0
+accelerate
+peft
+omegaconf
+einops
+datasets
+imageio
+imageio-ffmpeg
+av
+opencv-python-headless
+ftfy
+sentencepiece
+huggingface_hub
+tqdm
+wandb
+
+# Wan cross-attention uses FlashAttention.
+flash-attn>=2.7
+
+# Optional: enables the Triton block-sparse backend for the HSA sparse branch.
+# triton>=3.0
+
+# Optional: sequence parallelism for Wan's own sampler (wan/distributed).
+# xfuser>=0.4
