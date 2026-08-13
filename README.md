@@ -18,8 +18,8 @@
   <a href="https://github.com/andakai">Dakai An</a><sup>3*</sup> &nbsp;
   <a href="https://wangbo-zhao.github.io/">Wangbo Zhao</a><sup>3</sup> &nbsp;
   <a href="https://scholar.google.com/citations?user=QJGroC0AAAAJ&hl=en">Hanfeng Lu</a><sup>3</sup> &nbsp;
-  <a href="https://openreview.net/profile?id=%7EJiasheng_Tang1">Jiasheng Tang</a><sup>1&#8224;</sup> &nbsp;
-  <a href="https://scholar.google.com/citations?user=_YgjRn0AAAAJ&hl=en">Yinghao Yu</a><sup>4</sup> &nbsp;
+  <a href="https://openreview.net/profile?id=%7EJiasheng_Tang1">Jiasheng Tang</a><sup>1,4&#8224;</sup> &nbsp;
+  <a href="https://scholar.google.com/citations?user=_YgjRn0AAAAJ&hl=en">Yinghao Yu</a><sup>5</sup> &nbsp;
   <a href="https://www.cse.ust.hk/~weiwa/">Wei Wang</a><sup>3</sup> &nbsp;
   <a href="https://bohanzhuang.github.io/">Bohan Zhuang</a><sup>1,2&#8224;</sup>
 </p>
@@ -28,7 +28,8 @@
   <sup>1</sup>DAMO Academy, Alibaba Group &nbsp;&nbsp;
   <sup>2</sup>Zhejiang University &nbsp;&nbsp;
   <sup>3</sup>HKUST &nbsp;&nbsp;
-  <sup>4</sup>TRE, Alibaba Group
+  <sup>4</sup>Hupan Lab
+  <sup>5</sup>TRE, Alibaba Group &nbsp;&nbsp;
 </p>
 
 <p align="center">
