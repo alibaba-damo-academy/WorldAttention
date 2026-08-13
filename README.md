@@ -28,8 +28,8 @@
   <sup>1</sup>DAMO Academy, Alibaba Group &nbsp;&nbsp;
   <sup>2</sup>Zhejiang University &nbsp;&nbsp;
   <sup>3</sup>HKUST &nbsp;&nbsp;
-  <sup>4</sup>Hupan Lab
-  <sup>5</sup>TRE, Alibaba Group &nbsp;&nbsp;
+  <sup>4</sup>Hupan Lab &nbsp;&nbsp;
+  <sup>5</sup>TRE, Alibaba Group
 </p>
 
 <p align="center">
