@@ -99,15 +99,12 @@ pip install -r requirements.txt
 Three stages, each resuming from the previous one's checkpoint:
 
 ```bash
-# Stage 1 - adapt the bidirectional model into a 4-step causal student (dense attention)
 torchrun --nproc_per_node=8 train.py \
   --config_path configs/train_stage1_causal.yaml --logdir logs_stage1
 
-# Stage 2 - HSA warmup: base frozen, HSA parameters trained by attention self-distillation
 torchrun --nproc_per_node=8 train.py \
   --config_path configs/train_stage2_hsa_warmup.yaml --logdir logs_stage2
 
-# Stage 3 - HSA tune: streaming prompt-switch distillation with HSA active
 torchrun --nproc_per_node=8 train.py \
   --config_path configs/train_stage3_hsa_tune.yaml --logdir logs_stage3
 ```
