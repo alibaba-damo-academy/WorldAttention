@@ -11,11 +11,7 @@ import torch.distributed as dist
 
 class DMD(SelfForcingModel):
     def __init__(self, args, device):
-        """
-        Initialize the DMD (Distribution Matching Distillation) module.
-        This class is self-contained and compute generator and fake score losses
-        in the forward pass.
-        """
+        """Initialize the DMD (Distribution Matching Distillation) module."""
         super().__init__(args, device)
         self.num_frame_per_block = getattr(args, "num_frame_per_block", 1)
         self.same_step_across_blocks = getattr(args, "same_step_across_blocks", True)
@@ -32,10 +28,8 @@ class DMD(SelfForcingModel):
             self.generator.enable_gradient_checkpointing()
             self.fake_score.enable_gradient_checkpointing()
 
-        # this will be init later with fsdp-wrapped modules
         self.inference_pipeline: SelfForcingTrainingPipeline = None
 
-        # Step 2: Initialize all dmd hyperparameters
         self.num_train_timestep = args.num_train_timestep
         self.min_step = int(0.02 * self.num_train_timestep)
         self.max_step = int(0.98 * self.num_train_timestep)
@@ -62,20 +56,7 @@ class DMD(SelfForcingModel):
         conditional_dict: dict, unconditional_dict: dict,
         normalization: bool = True
     ) -> Tuple[torch.Tensor, dict]:
-        """
-        Compute the KL grad (eq 7 in https://arxiv.org/abs/2311.18828).
-        Input:
-            - noisy_image_or_video: a tensor with shape [B, F, C, H, W] where the number of frame is 1 for images.
-            - estimated_clean_image_or_video: a tensor with shape [B, F, C, H, W] representing the estimated clean image or video.
-            - timestep: a tensor with shape [B, F] containing the randomly generated timestep.
-            - conditional_dict: a dictionary containing the conditional information (e.g. text embeddings, image embeddings).
-            - unconditional_dict: a dictionary containing the unconditional information (e.g. null/negative text embeddings, null/negative image embeddings).
-            - normalization: a boolean indicating whether to normalize the gradient.
-        Output:
-            - kl_grad: a tensor representing the KL grad.
-            - kl_log_dict: a dictionary containing the intermediate tensors for logging.
-        """
-        # Step 1: Compute the fake score
+        """Compute the KL grad (eq 7 in https://arxiv.org/abs/2311.18828)."""
         _, pred_fake_image_cond = self.fake_score(
             noisy_image_or_video=noisy_image_or_video,
             conditional_dict=conditional_dict,
@@ -94,9 +75,6 @@ class DMD(SelfForcingModel):
         else:
             pred_fake_image = pred_fake_image_cond
 
-        # Step 2: Compute the real score
-        # We compute the conditional and unconditional prediction
-        # and add them together to achieve cfg (https://arxiv.org/abs/2207.12598)
         _, pred_real_image_cond = self.real_score(
             noisy_image_or_video=noisy_image_or_video,
             conditional_dict=conditional_dict,
@@ -113,11 +91,9 @@ class DMD(SelfForcingModel):
             pred_real_image_cond - pred_real_image_uncond
         ) * self.real_guidance_scale
 
-        # Step 3: Compute the DMD gradient (DMD paper eq. 7).
         grad = (pred_fake_image - pred_real_image)
 
         if normalization:
-            # Step 4: Gradient normalization (DMD paper eq. 8).
             p_real = (estimated_clean_image_or_video - pred_real_image)
             normalizer = torch.abs(p_real).mean(dim=[1, 2, 3, 4], keepdim=True)
             grad = grad / normalizer
@@ -137,23 +113,12 @@ class DMD(SelfForcingModel):
         denoised_timestep_from: int = 0,
         denoised_timestep_to: int = 0
     ) -> Tuple[torch.Tensor, dict]:
-        """
-        Compute the DMD loss (eq 7 in https://arxiv.org/abs/2311.18828).
-        Input:
-            - image_or_video: a tensor with shape [B, F, C, H, W] where the number of frame is 1 for images.
-            - conditional_dict: a dictionary containing the conditional information (e.g. text embeddings, image embeddings).
-            - unconditional_dict: a dictionary containing the unconditional information (e.g. null/negative text embeddings, null/negative image embeddings).
-            - gradient_mask: a boolean tensor with the same shape as image_or_video indicating which pixels to compute loss .
-        Output:
-            - dmd_loss: a scalar tensor representing the DMD loss.
-            - dmd_log_dict: a dictionary containing the intermediate tensors for logging.
-        """
+        """Compute the DMD loss (eq 7 in https://arxiv.org/abs/2311.18828)."""
         original_latent = image_or_video
 
         batch_size, num_frame = image_or_video.shape[:2]
 
         with torch.no_grad():
-            # Step 1: Randomly sample timestep based on the given schedule and corresponding noise
             min_timestep = denoised_timestep_to if self.ts_schedule and denoised_timestep_to is not None else self.min_score_timestep
             max_timestep = denoised_timestep_from if self.ts_schedule_max and denoised_timestep_from is not None else self.num_train_timestep
             timestep = self._get_timestep(
@@ -178,7 +143,6 @@ class DMD(SelfForcingModel):
                 timestep.flatten(0, 1)
             ).detach().unflatten(0, (batch_size, num_frame))
 
-            # Step 2: Compute the KL grad
             grad, dmd_log_dict = self._compute_kl_grad(
                 noisy_image_or_video=noisy_latent,
                 estimated_clean_image_or_video=original_latent,
@@ -203,21 +167,7 @@ class DMD(SelfForcingModel):
         clean_latent: torch.Tensor,
         initial_latent: torch.Tensor = None
     ) -> Tuple[torch.Tensor, dict]:
-        """
-        Generate image/videos from noise and compute the DMD loss.
-        The noisy input to the generator is backward simulated.
-        This removes the need of any datasets during distillation.
-        See Sec 4.5 of the DMD2 paper (https://arxiv.org/abs/2405.14867) for details.
-        Input:
-            - image_or_video_shape: a list containing the shape of the image or video [B, F, C, H, W].
-            - conditional_dict: a dictionary containing the conditional information (e.g. text embeddings, image embeddings).
-            - unconditional_dict: a dictionary containing the unconditional information (e.g. null/negative text embeddings, null/negative image embeddings).
-            - clean_latent: a tensor containing the clean latents [B, F, C, H, W]. Need to be passed when no backward simulation is used.
-        Output:
-            - loss: a scalar tensor representing the generator loss.
-            - generator_log_dict: a dictionary containing the intermediate tensors for logging.
-        """
-        # Step 1: Unroll generator to obtain fake videos
+        """Generate image/videos from noise and compute the DMD loss."""
         slice_last_frames = getattr(self.args, "slice_last_frames", 21)
         _t_gen_start = time.time()
         pred_image, gradient_mask, denoised_timestep_from, denoised_timestep_to = self._run_generator(
@@ -227,7 +177,6 @@ class DMD(SelfForcingModel):
             slice_last_frames=slice_last_frames
         )
         gen_time = time.time() - _t_gen_start
-        # Step 2: Compute the DMD loss
         _t_loss_start = time.time()
         dmd_loss, dmd_log_dict = self.compute_distribution_matching_loss(
             image_or_video=pred_image,
@@ -258,22 +207,8 @@ class DMD(SelfForcingModel):
         clean_latent: torch.Tensor,
         initial_latent: torch.Tensor = None
     ) -> Tuple[torch.Tensor, dict]:
-        """
-        Generate image/videos from noise and train the critic with generated samples.
-        The noisy input to the generator is backward simulated.
-        This removes the need of any datasets during distillation.
-        See Sec 4.5 of the DMD2 paper (https://arxiv.org/abs/2405.14867) for details.
-        Input:
-            - image_or_video_shape: a list containing the shape of the image or video [B, F, C, H, W].
-            - conditional_dict: a dictionary containing the conditional information (e.g. text embeddings, image embeddings).
-            - unconditional_dict: a dictionary containing the unconditional information (e.g. null/negative text embeddings, null/negative image embeddings).
-            - clean_latent: a tensor containing the clean latents [B, F, C, H, W]. Need to be passed when no backward simulation is used.
-        Output:
-            - loss: a scalar tensor representing the generator loss.
-            - critic_log_dict: a dictionary containing the intermediate tensors for logging.
-        """
+        """Generate image/videos from noise and train the critic with generated samples."""
         slice_last_frames = getattr(self.args, "slice_last_frames", 21)
-        # Step 1: Run generator on backward simulated noisy input
         _t_gen_start = time.time()
         with torch.no_grad():
             generated_image, _, denoised_timestep_from, denoised_timestep_to = self._run_generator(
@@ -286,7 +221,6 @@ class DMD(SelfForcingModel):
         batch_size, num_frame = generated_image.shape[:2]
         _t_loss_start = time.time()
 
-        # Step 2: Compute the fake prediction
         min_timestep = denoised_timestep_to if self.ts_schedule and denoised_timestep_to is not None else self.min_score_timestep
         max_timestep = denoised_timestep_from if self.ts_schedule_max and denoised_timestep_from is not None else self.num_train_timestep
         critic_timestep = self._get_timestep(
@@ -317,7 +251,6 @@ class DMD(SelfForcingModel):
             timestep=critic_timestep
         )
 
-        # Step 3: Compute the denoising loss for the fake critic
         if self.args.denoising_loss_type == "flow":
             from utils.wan_wrapper import WanDiffusionWrapper
             flow_pred = WanDiffusionWrapper._convert_x0_to_flow_pred(
@@ -351,8 +284,6 @@ class DMD(SelfForcingModel):
             loss_val = float('nan')
         loss_time = time.time() - _t_loss_start
 
-
-        # Step 5: Debugging Log
         critic_log_dict = {
             "critic_timestep": critic_timestep.detach(),
             "gen_time": gen_time,

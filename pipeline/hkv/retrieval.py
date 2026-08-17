@@ -1,15 +1,4 @@
-"""Two-stage retrieval over the hierarchical KV bank.
-
-Stage 1 narrows the bank to the chunks whose prompt embedding is most similar to the current
-prompt, by cosine similarity. Stage 2 pools the pages of those candidate chunks and takes the
-global top-``K_p`` by the affinity
-
-    alpha = (Qbar . Kbar) / sqrt(d)
-
-between the current chunk's mean query and each page's mean key. Pooling across candidates before
-the top-K matters: selecting within a single chunk degenerates whenever the chunk holds no more
-pages than the budget.
-"""
+"""Two-stage retrieval over the hierarchical KV bank."""
 from __future__ import annotations
 
 from typing import List, Optional, Sequence, Tuple
@@ -23,27 +12,22 @@ __all__ = [
     "prompt_index",
     "query_index",
     "page_key_index",
+    "page_key_index_layers",
     "score_pages",
+    "score_pages_layers",
     "select_top_chunks",
     "select_topk_pages",
 ]
 
 
 def prompt_index(prompt_embeds: torch.Tensor) -> torch.Tensor:
-    """Mean-pool a prompt embedding into a unit vector for Stage-1 cosine similarity.
-
-    ``prompt_embeds`` is ``[B, tokens, dim]``; returns ``[dim]``.
-    """
+    """Mean-pool a prompt embedding into a unit vector for Stage-1 cosine similarity."""
     pooled = prompt_embeds.float().mean(dim=1).mean(dim=0)
     return F.normalize(pooled, dim=0)
 
 
 def query_index(q_tokens: torch.Tensor) -> torch.Tensor:
-    """Mean-pool pre-rotation attention queries into the Stage-2 query vector ``Qbar``.
-
-    ``q_tokens`` is ``[B, tokens, H * D]`` taken before the rotary embedding is applied, so it lives
-    in the same content space as :func:`page_key_index`. Returns ``[H * D]``.
-    """
+    """Mean-pool pre-rotation attention queries into the Stage-2 query vector ``Qbar``."""
     return q_tokens.float().mean(dim=1).mean(dim=0)
 
 
@@ -55,12 +39,7 @@ def page_key_index(
     start_frame: int,
     temporal_freqs: torch.Tensor,
 ) -> Optional[torch.Tensor]:
-    """Build the per-page mean key ``Kbar`` in content space.
-
-    ``keys`` is ``[B, tokens, H, D]`` as stored in the cache, i.e. already rotated. Each token's
-    temporal rotation is removed before pooling so the index matches a pre-rotation query.
-    Returns ``[num_pages, H * D]``, or None when there are no pages.
-    """
+    """Build the per-page mean key ``Kbar`` in content space."""
     if not page_spans:
         return None
     device = keys.device
@@ -70,6 +49,64 @@ def page_key_index(
     return torch.stack(
         [content_keys[:, start:end].mean(dim=1).mean(dim=0) for start, end in page_spans], dim=0
     )
+
+
+def page_key_index_layers(
+    kv_cache: Sequence[dict],
+    token_start: int,
+    token_end: int,
+    page_spans: Sequence[Tuple[int, int]],
+    *,
+    frame_seq_length: int,
+    start_frame: int,
+    temporal_freqs: torch.Tensor,
+    layers: Sequence[int],
+    device=None,
+) -> Optional[torch.Tensor]:
+    """Per-page mean keys for several cache layers: ``[num_pages, len(layers), H * D]``."""
+    if not page_spans or not layers:
+        return None
+    per_layer = []
+    for layer in layers:
+        keys = kv_cache[layer]["k"][:, token_start:token_end].detach()
+        if device is not None:
+            keys = keys.to(device)
+        per_layer.append(page_key_index(
+            keys, page_spans, frame_seq_length=frame_seq_length, start_frame=start_frame,
+            temporal_freqs=temporal_freqs.to(keys.device),
+        ))
+    return torch.stack(per_layer, dim=1)
+
+
+def score_pages_layers(
+    query_vec: torch.Tensor,
+    page_index: torch.Tensor,
+    scale: Optional[float] = None,
+) -> torch.Tensor:
+    """Combined affinity of every page, over one or more indexed layers."""
+    if page_index.numel() == 0:
+        return page_index.new_zeros((0,))
+    index = page_index.float()
+    if index.dim() == 2:
+        index = index.unsqueeze(1)
+    query = query_vec.to(device=index.device, dtype=index.dtype)
+    if query.dim() == 1:
+        query = query.unsqueeze(0)
+    num_layers = index.shape[1]
+    if query.shape[0] != num_layers:
+        if query.shape[0] == 1:
+            index = index[:, :1]
+        elif num_layers == 1:
+            query = query[:1]
+        else:
+            raise ValueError(
+                f"query has {query.shape[0]} layers but the page index has {num_layers}")
+    if scale is None:
+        scale = float(index.shape[-1]) ** 0.5
+    logits = torch.einsum("pld,ld->pl", index, query)
+    if scale and scale > 0:
+        logits = logits / scale
+    return torch.softmax(logits, dim=0).mean(dim=1)
 
 
 def score_pages(
@@ -90,10 +127,7 @@ def score_pages(
 
 
 def select_top_chunks(query_vec: torch.Tensor, chunk_index: torch.Tensor, topk: int) -> List[int]:
-    """Stage 1: chunk ids whose prompt index is most cosine-similar to ``query_vec``.
-
-    ``chunk_index`` is ``[num_chunks, dim]`` of unit vectors; ``query_vec`` is a unit vector.
-    """
+    """Stage 1: chunk ids whose prompt index is most cosine-similar to ``query_vec``."""
     if chunk_index.numel() == 0 or topk <= 0:
         return []
     query = query_vec.to(device=chunk_index.device, dtype=chunk_index.dtype).reshape(-1)
@@ -107,20 +141,30 @@ def select_topk_pages(
     candidates: Sequence[Tuple[int, int, torch.Tensor]],
     topk: int,
     scale: Optional[float] = None,
+    max_per_chunk: Optional[int] = None,
+    bonus: Optional[torch.Tensor] = None,
 ) -> List[Tuple[int, int, float]]:
-    """Stage 2: global top-``K_p`` pages across all candidate chunks.
-
-    ``candidates`` holds ``(chunk_id, page_id, page_index_vector)`` triples. Returns
-    ``(chunk_id, page_id, score)`` highest-first, at most ``topk`` entries.
-    """
+    """Stage 2: top-``K_p`` pages across all candidate chunks."""
     if topk <= 0 or len(candidates) == 0:
         return []
-    index = torch.stack([c[2].reshape(-1).float() for c in candidates], dim=0)
-    scores = score_pages(query_vec.float(), index, scale=scale)
-    k = min(int(topk), scores.shape[0])
-    top = torch.topk(scores, k=k, largest=True, sorted=True)
-    out = []
-    for rank in range(k):
-        chunk_id, page_id, _ = candidates[int(top.indices[rank].item())]
-        out.append((int(chunk_id), int(page_id), float(top.values[rank].item())))
+    vectors = [c[2].float() for c in candidates]
+    if vectors[0].dim() == 1:
+        index = torch.stack([v.reshape(-1) for v in vectors], dim=0)
+    else:
+        index = torch.stack(vectors, dim=0)
+    scores = score_pages_layers(query_vec.float(), index, scale=scale)
+    if bonus is not None:
+        scores = scores + bonus.to(device=scores.device, dtype=scores.dtype).reshape(-1)
+
+    cap = int(max_per_chunk) if max_per_chunk else None
+    taken: dict = {}
+    out: List[Tuple[int, int, float]] = []
+    for position in torch.argsort(scores, descending=True).tolist():
+        if len(out) >= int(topk):
+            break
+        chunk_id, page_id, _ = candidates[position]
+        if cap is not None and taken.get(chunk_id, 0) >= cap:
+            continue
+        taken[chunk_id] = taken.get(chunk_id, 0) + 1
+        out.append((int(chunk_id), int(page_id), float(scores[position].item())))
     return out

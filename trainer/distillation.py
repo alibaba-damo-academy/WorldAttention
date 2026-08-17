@@ -20,6 +20,7 @@ except ImportError:
 from model import DMD, DMDSwitch, DMDHSA
 from trainer.hsa_stage import (
     collect_distill_losses,
+    configure_hsa_runtime,
     configure_hsa_trainable,
     init_hsa_parameters,
     reduce_distill_losses,
@@ -35,7 +36,6 @@ from torch.distributed.fsdp import (
 )
 from torchvision.io import write_video
 
-# LoRA related imports
 import peft
 from peft import get_peft_model_state_dict
 import safetensors.torch
@@ -51,22 +51,21 @@ except ImportError:
     OneLoggerUtils = None
 import time
 
+
 class Trainer:
     
     def __init__(self, config):
         self.config = config
         self.step = 0
-        # True once we auto-resume a checkpoint belonging to THIS stage (under output_path). Used to
-        # keep reset_step from wiping a mid-stage resume (see the reset_step block below).
         self._resumed_this_stage = False
 
-        # Step 1: Initialize the distributed training environment (rank, seed, dtype, logging etc.)
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
         launch_distributed_job()
         global_rank = dist.get_rank()
         self.world_size = dist.get_world_size()
+        self.gradient_accumulation_steps = int(getattr(config, "gradient_accumulation_steps", 1) or 1)
 
         self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
         self.device = torch.cuda.current_device()
@@ -74,17 +73,11 @@ class Trainer:
         self.causal = config.causal
         self.disable_wandb = config.disable_wandb
 
-        # ---- HSA training knobs (all default-off; only active for the HSA stage / warmup) ----
-        # Auxiliary per-layer HSA->dense attention self-distillation weight added to the streaming
-        # generator loss. This is the strong signal that opens the fusion gate and learns the
-        # low-rank projections. 0 disables collection entirely.
         self.hsa_distill_weight = float(getattr(config, "hsa_distill_weight", 0.0))
-        # Warmup: generator loss = distill only (skip the DMD term entirely, so no teacher rollout).
         self.hsa_distill_only = bool(getattr(config, "hsa_distill_only", False))
-        # Warmup: freeze the whole generator except the HSA-specific params (k/v_proj_mat, gate_lin).
+        self.hsa_skip_critic = bool(getattr(config, "hsa_skip_critic", self.hsa_distill_only))
         self.hsa_train_params_only = bool(getattr(config, "hsa_train_params_only", False))
 
-        # use a random seed for the training
         if config.seed == 0:
             random_seed = torch.randint(0, 10000000, (1,), device=self.device)
             dist.broadcast(random_seed, src=0)
@@ -103,7 +96,6 @@ class Trainer:
                 else None
             )
             wandb.login(
-                # host=config.wandb_host,
                 key=config.wandb_key)
             wandb.init(
                 config=wandb_config,
@@ -117,7 +109,6 @@ class Trainer:
         self.output_path = config.logdir
         app_start_time = time.time_ns() / 1_000_000 
         
-        # ------------------------------------- One Logger Setup ----------------------------------------------
         if self.use_one_logger and dist.get_rank() == 0 and not self.disable_wandb:
             app_tag_run_name = f"dmd_{config.real_name[:6]}_local_attn_size_{config.model_kwargs.local_attn_size}_lr_{config.lr}"
             app_tag_run_version = "0.0.0"
@@ -134,7 +125,7 @@ class Trainer:
                 "app_tag_run_name": app_tag_run_name,
                 "one_logger_run_name": app_tag_run_name,
                 "world_size": dist.get_world_size(),
-                "global_batch_size": config.batch_size * getattr(config, "gradient_accumulation_steps", 1) * dist.get_world_size(),
+                "global_batch_size": config.batch_size * self.gradient_accumulation_steps * dist.get_world_size(),
                 "batch_size": config.batch_size,
                 "train_iterations_target": getattr(config, "max_iters", 0),
                 "train_samples_target": (getattr(config, "max_iters", 0) * config.batch_size) if getattr(config, "max_iters", 0) else 0,
@@ -153,7 +144,6 @@ class Trainer:
         else:
             self.one_logger = None
 
-        # Step 2: Initialize the model
         if self.one_logger is not None:
             self.one_logger.on_model_init_start()
 
@@ -172,15 +162,12 @@ class Trainer:
         else:
             raise ValueError("Invalid distribution matching loss")
 
-        # Save pretrained model state_dicts to CPU
         self.fake_score_state_dict_cpu = self.model.fake_score.state_dict()
 
-        # Auto resume configuration (needed for LoRA checkpoint loading)
-        auto_resume = getattr(config, "auto_resume", True)  # Default to True
+        auto_resume = getattr(config, "auto_resume", True)
         allow_partial_generator_ckpt = bool(getattr(config, "allow_partial_generator_ckpt", False))
         resume_optimizer_state = bool(getattr(config, "resume_optimizer_state", True))
 
-        # ================================= LoRA Configuration =================================
         self.is_lora_enabled = False
         self.lora_config = None
         if hasattr(config, 'adapter') and config.adapter is not None:
@@ -191,16 +178,12 @@ class Trainer:
                 print(f"LoRA enabled with config: {self.lora_config}")
                 print("Loading base model and applying LoRA before FSDP wrapping...")
             
-            # 1. Load base model first (config.generator_ckpt) - before applying LoRA and FSDP
             base_checkpoint_path = getattr(config, "generator_ckpt", None)
             if base_checkpoint_path:
                 if self.is_main_process:
                     print(f"Loading base model from {base_checkpoint_path} (before applying LoRA)")
                 base_checkpoint = torch.load(base_checkpoint_path, map_location="cpu")
                 
-                # Load generator (directly; no key alignment needed since LoRA not applied yet).
-                # A dense base checkpoint has no HSA parameters, so a stage that introduces HSA sets
-                # allow_partial_generator_ckpt and initializes them explicitly below.
                 _gen_sd_key = "generator" if "generator" in base_checkpoint else ("model" if "model" in base_checkpoint else None)
                 if _gen_sd_key is not None:
                     if self.is_main_process:
@@ -225,7 +208,6 @@ class Trainer:
                     if self.is_main_process:
                         print("Warning: Generator checkpoint not found in base model.")
                 
-                # Load critic
                 if "critic" in base_checkpoint:
                     if self.is_main_process:
                         print(f"Loading pretrained critic from {base_checkpoint_path}")
@@ -239,7 +221,6 @@ class Trainer:
                 if self.is_main_process:
                     raise ValueError("No base model checkpoint specified for LoRA training.")
             
-            # Load training step
             if "step" in base_checkpoint:
                 self.step = base_checkpoint["step"]
                 if self.is_main_process:
@@ -248,12 +229,10 @@ class Trainer:
                 if self.is_main_process:
                     print("Warning: Step not found in checkpoint, starting from step 0.")
             
-            # 2. Apply LoRA wrapping now (after loading base model, before FSDP wrapping)
             if self.is_main_process:
                 print("Applying LoRA to models...")
             self.model.generator.model = self._configure_lora_for_model(self.model.generator.model, "generator")
             
-            # Configure LoRA for fake_score if needed
             if getattr(self.lora_config, 'apply_to_critic', True):
                 self.model.fake_score.model = self._configure_lora_for_model(self.model.fake_score.model, "fake_score")
                 if self.is_main_process:
@@ -262,10 +241,8 @@ class Trainer:
                 if self.is_main_process:
                     print("LoRA applied to generator only")
             
-            # 3. Load LoRA weights before FSDP wrapping (if a checkpoint is available)
             lora_checkpoint_path = None
             if auto_resume and self.output_path:
-                # Find the latest checkpoint and verify it is a LoRA checkpoint
                 latest_checkpoint = self.find_latest_checkpoint(self.output_path)
                 if latest_checkpoint:
                     try:
@@ -292,7 +269,6 @@ class Trainer:
                 if self.is_main_process:
                     print("Auto resume disabled for LoRA")
             
-            # If no auto-resumed LoRA checkpoint found, try config.lora_ckpt
             if lora_checkpoint_path is None:
                 lora_ckpt_path = getattr(config, "lora_ckpt", None)
                 if lora_ckpt_path:
@@ -313,28 +289,23 @@ class Trainer:
                     if self.is_main_process:
                         print("No LoRA checkpoint specified, starting LoRA training from scratch")
             
-            # Load LoRA checkpoint (before FSDP wrapping)
             if lora_checkpoint_path:
                 if self.is_main_process:
                     print(f"Loading LoRA checkpoint from {lora_checkpoint_path} (before FSDP wrapping)")
                 lora_checkpoint = torch.load(lora_checkpoint_path, map_location="cpu")
                 
-                # Load LoRA weights using PEFT's standard method
                 if "generator_lora" in lora_checkpoint:
                     if self.is_main_process:
                         print(f"Loading LoRA generator weights: {len(lora_checkpoint['generator_lora'])} keys in checkpoint")
                     
-                    # Use PEFT's set_peft_model_state_dict; it automatically aligns key names
                     peft.set_peft_model_state_dict(self.model.generator.model, lora_checkpoint["generator_lora"])
                 
                 if "critic_lora" in lora_checkpoint:
                     if self.is_main_process:
                         print(f"Loading LoRA critic weights: {len(lora_checkpoint['critic_lora'])} keys in checkpoint")
                     
-                    # Use PEFT's set_peft_model_state_dict; it automatically aligns key names
                     peft.set_peft_model_state_dict(self.model.fake_score.model, lora_checkpoint["critic_lora"])
 
-                # Load training step
                 if "step" in lora_checkpoint:
                     self.step = lora_checkpoint["step"]
                     if self.is_main_process:
@@ -343,9 +314,8 @@ class Trainer:
                 if self.is_main_process:
                     print("No LoRA checkpoint to load, starting from scratch")
 
-        # Configure which generator params train under the HSA stage/warmup. Must run BEFORE FSDP
-        # wrapping and optimizer creation so both see the correct requires_grad flags. No-op unless
-        # an HSA training knob is set.
+        self._enable_hsa_on_generator()
+
         self._configure_hsa_trainable()
 
         if config.mixed_precision:
@@ -385,11 +355,6 @@ class Trainer:
         self.model.vae = self.model.vae.to(
             device=self.device, dtype=torch.bfloat16 if config.mixed_precision else torch.float32)
 
-        # if not config.no_visualize or config.load_raw_video:
-        #     self.model.vae = self.model.vae.to(
-        #         device=self.device, dtype=torch.bfloat16 if config.mixed_precision else torch.float32)
-
-        # Step 3: Set up EMA parameter containers
         rename_param = (
             lambda name: name.replace("_fsdp_wrapped_module.", "")
             .replace("_checkpoint_wrapped_module.", "")
@@ -417,7 +382,6 @@ class Trainer:
         if self.one_logger is not None:
             self.one_logger.on_model_init_end()
         
-        # Step 4: Initialize the optimizer
         if self.one_logger is not None:
             self.one_logger.on_optimizer_init_start()
 
@@ -440,7 +404,6 @@ class Trainer:
         if self.one_logger is not None:
             self.one_logger.on_optimizer_init_end() 
 
-        # Step 5: Initialize the dataloader
         if self.one_logger is not None:
             self.one_logger.on_dataloader_init_start()
         if self.config.i2v:
@@ -461,11 +424,9 @@ class Trainer:
             print("DATASET SIZE %d" % len(dataset))
         self.dataloader = cycle(dataloader)
 
-        # Step 6: Initialize the validation dataloader for visualization (fixed prompts)
         self.fixed_vis_batch = None
         self.vis_interval = getattr(config, "vis_interval", -1)
         if self.vis_interval > 0 and len(getattr(config, "vis_video_lengths", [])) > 0:
-            # Determine validation data path
             val_data_path = getattr(config, "val_data_path", None) or config.data_path
 
             if self.config.i2v:
@@ -480,7 +441,6 @@ class Trainer:
 
             sampler = torch.utils.data.distributed.DistributedSampler(
                 val_dataset, shuffle=False, drop_last=False)
-            # streaming sampling to keep prompts fixed
             val_dataloader = torch.utils.data.DataLoader(
                 val_dataset,
                 batch_size=getattr(config, "val_batch_size", 1),
@@ -488,16 +448,11 @@ class Trainer:
                 num_workers=8,
             )
 
-            # Take the first batch as fixed visualization batch
             try:
                 self.fixed_vis_batch = next(iter(val_dataloader))
             except StopIteration:
                 self.fixed_vis_batch = None
             
-            # ----------------------------------------------------------------------------------------------------------
-            # Visualization settings
-            # ----------------------------------------------------------------------------------------------------------
-            # List of video lengths to visualize, e.g. [8, 16, 32]
             self.vis_video_lengths = getattr(config, "vis_video_lengths", [])
 
             if self.vis_interval > 0 and len(self.vis_video_lengths) > 0:
@@ -509,11 +464,9 @@ class Trainer:
         if self.one_logger is not None:
             self.one_logger.on_load_checkpoint_start()
         if not self.is_lora_enabled:
-            # ================================= Standard (non-LoRA) model logic =================================
             checkpoint_path = None
             
             if auto_resume and self.output_path:
-                # Auto resume: find latest checkpoint in logdir
                 latest_checkpoint = self.find_latest_checkpoint(self.output_path)
                 if latest_checkpoint:
                     checkpoint_path = latest_checkpoint
@@ -532,7 +485,6 @@ class Trainer:
             
             if checkpoint_path is None:
                 if getattr(config, "generator_ckpt", False):
-                    # Explicit checkpoint path provided
                     checkpoint_path = config.generator_ckpt
                     if self.is_main_process:
                         print(f"Using explicit checkpoint: {checkpoint_path}")
@@ -542,7 +494,6 @@ class Trainer:
                     print(f"Loading checkpoint from {checkpoint_path}")
                 checkpoint = torch.load(checkpoint_path, map_location="cpu")
                 
-                # Load generator
                 if "generator" in checkpoint:
                     if self.is_main_process:
                         print(f"Loading pretrained generator from {checkpoint_path}")
@@ -585,7 +536,6 @@ class Trainer:
                     if self.is_main_process:
                         print("Warning: Generator checkpoint not found.")
                 
-                # Load critic
                 if "critic" in checkpoint:
                     if self.is_main_process:
                         print(f"Loading pretrained critic from {checkpoint_path}")
@@ -594,7 +544,6 @@ class Trainer:
                     if self.is_main_process:
                         print("Warning: Critic checkpoint not found.")
                 
-                # Load EMA
                 if "generator_ema" in checkpoint and self.generator_ema is not None:
                     if self.is_main_process:
                         print(f"Loading pretrained EMA from {checkpoint_path}")
@@ -603,7 +552,6 @@ class Trainer:
                     if self.is_main_process:
                         print("Warning: EMA checkpoint not found or EMA not initialized.")
                 
-                # Load optimizers when requested.
                 if resume_optimizer_state:
                     if "generator_optimizer" in checkpoint:
                         try:
@@ -647,7 +595,6 @@ class Trainer:
                 elif self.is_main_process:
                     print("[Checkpoint] Skip optimizer restore by config: resume_optimizer_state=False")
                 
-                # Load training step
                 if "step" in checkpoint:
                     self.step = checkpoint["step"]
                     if self.is_main_process:
@@ -658,33 +605,23 @@ class Trainer:
 
         if self.one_logger is not None:
             self.one_logger.on_load_checkpoint_end()
-        ##############################################################################################################
 
-        # A fresh stage (e.g. HSA warmup / HSA tune loading a prior stage's ckpt) should count its own
-        # steps from 0 rather than inheriting the loaded checkpoint's global step -- otherwise max_iters
-        # (an absolute global step) is immediately exceeded. Enable with reset_step: true. Skipped when
-        # auto-resuming THIS stage's own checkpoint, so mid-stage resumption keeps its progress.
         if bool(getattr(config, "reset_step", False)) and not self._resumed_this_stage:
             if self.is_main_process and self.step != 0:
                 print(f"[Checkpoint] reset_step=True: resetting global step {self.step} -> 0 for this stage")
             self.step = 0
 
-        # Let's delete EMA params for early steps to save some computes at training and inference
-        # Note: This should be done after potential resume to avoid accidentally deleting resumed EMA
         if self.step < config.ema_start_step:
             self.generator_ema = None
 
         self.max_grad_norm_generator = getattr(config, "max_grad_norm_generator", 10.0)
         self.max_grad_norm_critic = getattr(config, "max_grad_norm_critic", 10.0)
-        self.gradient_accumulation_steps = getattr(config, "gradient_accumulation_steps", 1)
         self.previous_time = None
         
-        # streaming training configuration
         self.streaming_training = getattr(config, "streaming_training", False)
         self.streaming_chunk_size = getattr(config, "streaming_chunk_size", 21)
         self.streaming_max_length = getattr(config, "streaming_max_length", 63)
         
-        # Create streaming training model if enabled
         if self.streaming_training:
             self.streaming_model = StreamingTrainingModel(self.model, config)
             if self.is_main_process:
@@ -692,13 +629,12 @@ class Trainer:
         else:
             self.streaming_model = None
         
-        # streaming training state (simplified)
-        self.streaming_active = False  # Whether we're currently in a sequence
+        self.streaming_active = False
         
         if self.is_main_process:
-            print(f"Gradient accumulation steps: {self.gradient_accumulation_steps}")
-            if self.gradient_accumulation_steps > 1:
-                print(f"Effective batch size: {config.batch_size * self.gradient_accumulation_steps * self.world_size}")
+            print(f"Gradient accumulation steps: {self.gradient_accumulation_steps} "
+                  f"(global batch {config.batch_size * self.gradient_accumulation_steps * self.world_size} = "
+                  f"{self.world_size} ranks x batch {config.batch_size} x {self.gradient_accumulation_steps} steps)")
             if self.streaming_training:
                 print(f"streaming training enabled: chunk_size={self.streaming_chunk_size}, max_length={self.streaming_max_length}")
 
@@ -734,7 +670,6 @@ class Trainer:
         for item in os.listdir(logdir):
             if item.startswith("checkpoint_model_") and os.path.isdir(os.path.join(logdir, item)):
                 try:
-                    # Extract step number from directory name
                     step_str = item.replace("checkpoint_model_", "")
                     step = int(step_str)
                     checkpoint_path = os.path.join(logdir, item, "model.pt")
@@ -746,7 +681,6 @@ class Trainer:
         if not checkpoint_dirs:
             return None
         
-        # Sort by step number and return the latest one
         checkpoint_dirs.sort(key=lambda x: x[0])
         latest_step, latest_path = checkpoint_dirs[-1]
         return latest_path
@@ -760,7 +694,6 @@ class Trainer:
         for item in os.listdir(logdir):
             if item.startswith("checkpoint_model_") and os.path.isdir(os.path.join(logdir, item)):
                 try:
-                    # Extract step number from directory name
                     step_str = item.replace("checkpoint_model_", "")
                     step = int(step_str)
                     checkpoint_dir_path = os.path.join(logdir, item)
@@ -770,28 +703,21 @@ class Trainer:
                 except ValueError:
                     continue
         
-        # Sort by step number (ascending order)
         checkpoint_dirs.sort(key=lambda x: x[0])
         return checkpoint_dirs
 
     def cleanup_old_checkpoints(self, logdir, max_checkpoints):
-        """Remove old checkpoints if the number exceeds max_checkpoints.
-        
-        Only the main process performs the actual deletion to avoid race conditions
-        in distributed training.
-        """
+        """Remove old checkpoints if the number exceeds max_checkpoints."""
         if max_checkpoints <= 0:
             return
         
-        # Only main process should perform cleanup to avoid race conditions
         if not self.is_main_process:
             return
             
         checkpoints = self.get_all_checkpoints(logdir)
         if len(checkpoints) > max_checkpoints:
-            # Calculate how many to remove
             num_to_remove = len(checkpoints) - max_checkpoints
-            checkpoints_to_remove = checkpoints[:num_to_remove]  # Remove oldest ones
+            checkpoints_to_remove = checkpoints[:num_to_remove]
             
             print(f"Checkpoint cleanup: Found {len(checkpoints)} checkpoints, removing {num_to_remove} oldest ones (keeping {max_checkpoints})")
             
@@ -831,7 +757,7 @@ class Trainer:
                     if dist.get_rank() == 0:
                         switch_idx = random.choice(choices)
                     else:
-                        switch_idx = 0  # placeholder; will be overwritten by broadcast
+                        switch_idx = 0
                 switch_idx_tensor = torch.tensor(switch_idx, device=self.device)
                 dist.broadcast(switch_idx_tensor, src=0)
                 switch_idx = switch_idx_tensor.item()
@@ -860,15 +786,29 @@ class Trainer:
             raise ValueError(f"Invalid switch_mode: {getattr(self.config, 'switch_mode', 'fixed')}")
         return switch_idx
 
+    def _enable_hsa_on_generator(self):
+        """Switch the generator's KV-cache attention to HSA and apply the stage's routing options."""
+        if not bool(getattr(self.config, "enable_hsa", False)):
+            return
+
+        hsa_backend = str(getattr(self.config, "hsa_backend", "auto"))
+        installed = 0
+        for module in self.model.generator.modules():
+            if hasattr(module, "use_hsa_kv_cache") and hasattr(module, "set_kv_cache_attn_backend"):
+                module.use_hsa_kv_cache = True
+                module.set_kv_cache_attn_backend("hsa", hsa_backend=hsa_backend)
+                installed += 1
+
+        applied = configure_hsa_runtime(self.model.generator, self.config)
+        if self.is_main_process:
+            print(f"[HSA-Train] HSA installed on {installed} attention modules; "
+                  f"backend={applied['backend']}, kv_granularity={applied['kv_granularity']}, "
+                  f"tau={applied['tau']}, budget={applied['budget']}, "
+                  f"current_chunk_tokens={applied['current_chunk_tokens']}, "
+                  f"routing_reuse={applied['routing_reuse']}")
 
     def _configure_hsa_trainable(self):
-        """Pick the generator's trainable set for an HSA stage.
-
-        ``hsa_train_params_only`` is the warmup configuration: freeze everything except the HSA
-        parameters. Otherwise the existing trainable set is kept and the HSA parameters are
-        additionally unfrozen, which the tune needs because an adapter library freezes every
-        non-adapter parameter. No-op unless an HSA knob is set, so the other stages are unaffected.
-        """
+        """Pick the generator's trainable set for an HSA stage."""
         hsa_active = (
             self.config.distribution_loss == "dmd_hsa"
             or self.hsa_train_params_only
@@ -909,7 +849,7 @@ class Trainer:
                 self.model.generator,
                 StateDictType.FULL_STATE_DICT,
                 FullStateDictConfig(rank0_only=True, offload_to_cpu=True),
-                FullOptimStateDictConfig(rank0_only=True),          # newly added
+                FullOptimStateDictConfig(rank0_only=True),
             ):
                 generator_state_dict  = self.model.generator.state_dict()
                 generator_opim_state_dict = FSDP.optim_state_dict(self.model.generator,
@@ -919,7 +859,7 @@ class Trainer:
                 self.model.fake_score,
                 StateDictType.FULL_STATE_DICT,
                 FullStateDictConfig(rank0_only=True, offload_to_cpu=True),
-                FullOptimStateDictConfig(rank0_only=True),          # newly added
+                FullOptimStateDictConfig(rank0_only=True),
             ):
                 critic_state_dict  = self.model.fake_score.state_dict()
                 critic_opim_state_dict = FSDP.optim_state_dict(self.model.fake_score,
@@ -950,7 +890,6 @@ class Trainer:
             torch.save(state_dict, checkpoint_file)
             print("Model saved to", checkpoint_file)
             
-            # Cleanup old checkpoints if max_checkpoints is set
             max_checkpoints = getattr(self.config, "max_checkpoints", 0)
             if max_checkpoints > 0:
                 self.cleanup_old_checkpoints(self.output_path, max_checkpoints)
@@ -964,19 +903,17 @@ class Trainer:
             self.one_logger.on_save_checkpoint_end(global_step=self.step)
 
     def fwdbwd_one_step(self, batch, train_generator):
-        self.model.eval()  # prevent any randomness (e.g. dropout)
+        self.model.eval()
 
         if self.step % 5 == 0:
             torch.cuda.empty_cache()
 
-        # Step 1: Get the next batch of text prompts
         text_prompts = batch["prompts"]
 
         batch_size = len(text_prompts)
         image_or_video_shape = list(self.config.image_or_video_shape)
         image_or_video_shape[0] = batch_size
 
-        # Step 2: Extract the conditional infos
         with torch.no_grad():
             conditional_dict = self.model.text_encoder(
                 text_prompts=text_prompts)
@@ -986,11 +923,10 @@ class Trainer:
                     text_prompts=[self.config.negative_prompt] * batch_size)
                 unconditional_dict = {k: v.detach()
                                       for k, v in unconditional_dict.items()}
-                self.unconditional_dict = unconditional_dict  # cache the unconditional_dict
+                self.unconditional_dict = unconditional_dict
             else:
                 unconditional_dict = self.unconditional_dict
 
-        # Step 3: Store gradients for the generator (if training the generator)
         if train_generator:
             generator_loss, generator_log_dict = self.model.generator_loss(
                 image_or_video_shape=image_or_video_shape,
@@ -1000,12 +936,10 @@ class Trainer:
                 initial_latent=None
             )
 
-            # Scale loss for gradient accumulation and backward
             scaled_generator_loss = generator_loss / self.gradient_accumulation_steps
             scaled_generator_loss.backward()
-            # Return original loss for logging
             generator_log_dict.update({"generator_loss": generator_loss,
-                                       "generator_grad_norm": torch.tensor(0.0, device=self.device)})  # Will be computed after accumulation
+                                       "generator_grad_norm": torch.tensor(0.0, device=self.device)})
 
             return generator_log_dict
         else:
@@ -1019,12 +953,10 @@ class Trainer:
             initial_latent=None
         )
 
-        # Scale loss for gradient accumulation and backward
         scaled_critic_loss = critic_loss / self.gradient_accumulation_steps
         scaled_critic_loss.backward()
-        # Return original loss for logging
         critic_log_dict.update({"critic_loss": critic_loss,
-                                "critic_grad_norm": torch.tensor(0.0, device=self.device)})  # Will be computed after accumulation
+                                "critic_grad_norm": torch.tensor(0.0, device=self.device)})
 
         return critic_log_dict
 
@@ -1033,7 +965,6 @@ class Trainer:
         if image is not None:
             image = image.squeeze(0).unsqueeze(0).unsqueeze(2).to(device="cuda", dtype=torch.bfloat16)
 
-            # Encode the input image as the first latent
             initial_latent = pipeline.vae.encode_to_latent(image).to(device="cuda", dtype=torch.bfloat16)
             initial_latent = initial_latent.repeat(batch_size, 1, 1, 1, 1)
             sampled_noise = torch.randn(
@@ -1064,7 +995,6 @@ class Trainer:
         if image is not None:
             image = image.squeeze(0).unsqueeze(0).unsqueeze(2).to(device="cuda", dtype=torch.bfloat16)
 
-            # Encode the input image as the first latent
             initial_latent = pipeline.vae.encode_to_latent(image).to(device="cuda", dtype=torch.bfloat16)
             initial_latent = initial_latent.repeat(batch_size, 1, 1, 1, 1)
             sampled_noise = torch.randn(
@@ -1094,10 +1024,8 @@ class Trainer:
     def start_new_sequence(self):
         
         
-        # Fetch a new batch
         batch = next(self.dataloader)
 
-        # Prepare conditional information
         text_prompts = batch["prompts"]
         if self.config.i2v:
             image_latent = batch["ode_latent"][:, -1][:, 0:1, ].to(
@@ -1122,7 +1050,6 @@ class Trainer:
         
         
         if self.streaming_model.possible_max_length is not None:
-            # Ensure all processes choose the same length
             if dist.is_initialized():
                 if dist.get_rank() == 0:
                     import random
@@ -1142,7 +1069,6 @@ class Trainer:
             
         
 
-        # Handle DMD Switch related information
         switch_conditional_dict = None
         switch_frame_index = None
         if isinstance(self.model, DMDSwitch) and "switch_prompts" in batch:
@@ -1155,7 +1081,6 @@ class Trainer:
             
             
         
-        # Set up the sequence
             
         self.streaming_model.setup_sequence(
             conditional_dict=conditional_dict,
@@ -1172,18 +1097,15 @@ class Trainer:
 
     def fwdbwd_one_step_streaming(self, train_generator):
         """Forward/backward pass using the new StreamingTrainingModel for serialized training"""
-        self.model.eval()  # prevent any randomness (e.g. dropout)
+        self.model.eval()
 
         if self.step % 5 == 0:
             torch.cuda.empty_cache()
 
-        # If no active sequence, start a new one
         if not self.streaming_active:
             self.start_new_sequence()
         
-        # Check whether we can generate more chunks
         if not self.streaming_model.can_generate_more():
-            # Current sequence is finished; start a new one
             self.streaming_active = False
             self.start_new_sequence()
         
@@ -1205,8 +1127,6 @@ class Trainer:
                     self.streaming_model.generate_next_chunk(requires_grad=False)
                 return self.streaming_model.generate_next_chunk(requires_grad=True)
 
-            # The per-layer HSA-to-dense signal is collected during the grad-enabled rollout: it is
-            # the whole objective for the warmup stage and an auxiliary term for the HSA tune.
             collect_distill = self.hsa_distill_only or self.hsa_distill_weight > 0.0
             hsa_distill_loss = None
             if collect_distill:
@@ -1218,21 +1138,13 @@ class Trainer:
                 generated_chunk, chunk_info = rollout_grad_chunk()
 
             if self.hsa_distill_only:
-                # Warmup: only match dense attention; no DMD term (so the 14B/1.3B teacher rollout is
-                # skipped entirely). Base is expected to be frozen via hsa_train_params_only.
                 if hsa_distill_loss is None:
                     hsa_distill_loss = torch.zeros([], device=self.device, dtype=torch.float32)
                 generator_loss = hsa_distill_loss
-                # FSDP anchor: the distill loss only touches deep HSA intermediates, so FSDP's
-                # pre-backward hook (registered on the generator's forward OUTPUT) never fires and the
-                # module stays IDLE -> the param post-backward hooks then assert. Add a zero-scaled
-                # term through the generated chunk (= the module output) so the pre-backward hook
-                # fires and FSDP enters FORWARD_BACKWARD. Zero coefficient => no effect on gradients.
                 if generated_chunk is not None and generated_chunk.requires_grad:
                     generator_loss = generator_loss + generated_chunk.float().sum() * 0.0
                 generator_log_dict = {"dmdtrain_gradient_norm": torch.tensor(0.0, device=self.device)}
             else:
-                # Compute generator (DMD) loss, optionally add the weighted distill regularizer.
                 generator_loss, generator_log_dict = self.streaming_model.compute_generator_loss(
                     chunk=generated_chunk,
                     chunk_info=chunk_info
@@ -1240,13 +1152,9 @@ class Trainer:
                 if hsa_distill_loss is not None and self.hsa_distill_weight > 0.0:
                     generator_loss = generator_loss + self.hsa_distill_weight * hsa_distill_loss.to(generator_loss.dtype)
 
-            # Scale loss for gradient accumulation and backward
             scaled_generator_loss = generator_loss / self.gradient_accumulation_steps
 
-
             try:
-                # Guard the degenerate warmup case where no grad-enabled HSA forward ran this step
-                # (distill_only + empty collection => a constant-zero loss that has no graph).
                 if scaled_generator_loss.requires_grad:
                     scaled_generator_loss.backward()
                 elif self.is_main_process:
@@ -1254,6 +1162,7 @@ class Trainer:
                           "(no HSA grad forward collected).")
             except RuntimeError as e:
                 raise
+            self.streaming_model._clear_cache_gradients()
 
             generator_log_dict.update({
                 "generator_loss": generator_loss,
@@ -1280,14 +1189,12 @@ class Trainer:
             if generated_chunk.requires_grad:
                 generated_chunk = generated_chunk.detach()
 
-            # Compute critic loss
             critic_loss, critic_log_dict = self.streaming_model.compute_critic_loss(
                 chunk=generated_chunk,
                 chunk_info=chunk_info
             )
             
             
-            # Scale loss for gradient accumulation and backward
             scaled_critic_loss = critic_loss / self.gradient_accumulation_steps
             scaled_critic_loss.backward()
             
@@ -1302,37 +1209,32 @@ class Trainer:
         start_step = self.step
         try:
             while True:
-                # Check if we should train generator on this optimization step
-                TRAIN_GENERATOR = self.step % self.config.dfake_gen_update_ratio == 0
+                TRAIN_GENERATOR = self.hsa_skip_critic or self.step % self.config.dfake_gen_update_ratio == 0
                 
 
                 if self.one_logger is not None:
                     self.one_logger.on_train_batch_start()
 
                 if self.streaming_training:
-                    # Zero-out all optimizer gradients
                     if TRAIN_GENERATOR:
                         self.generator_optimizer.zero_grad(set_to_none=True)
                     self.critic_optimizer.zero_grad(set_to_none=True)
                     
-                    # Whole-cycle gradient accumulation loop
                     accumulated_generator_logs = []
                     accumulated_critic_logs = []
                     
                     for accumulation_step in range(self.gradient_accumulation_steps):
                         
                         
-                        # Train generator (if needed)
                         if TRAIN_GENERATOR:
                             extra_gen = self.fwdbwd_one_step_streaming(True)
                             accumulated_generator_logs.append(extra_gen)
                         
-                        # Train critic
-                        extra_crit = self.fwdbwd_one_step_streaming(False)
-                        accumulated_critic_logs.append(extra_crit)
+                        if not self.hsa_skip_critic:
+                            extra_crit = self.fwdbwd_one_step_streaming(False)
+                            accumulated_critic_logs.append(extra_crit)
                         
                     
-                    # Compute grad norm and update parameters
                     if TRAIN_GENERATOR:
                         generator_grad_norm = self.model.generator.clip_grad_norm_(self.max_grad_norm_generator)
                         generator_log_dict = merge_dict_list(accumulated_generator_logs)
@@ -1345,15 +1247,15 @@ class Trainer:
                     else:
                         generator_log_dict = {}
                     
-                    critic_grad_norm = self.model.fake_score.clip_grad_norm_(self.max_grad_norm_critic)
-                    critic_log_dict = merge_dict_list(accumulated_critic_logs)
-                    critic_log_dict["critic_grad_norm"] = critic_grad_norm
+                    if self.hsa_skip_critic:
+                        critic_log_dict = {}
+                    else:
+                        critic_grad_norm = self.model.fake_score.clip_grad_norm_(self.max_grad_norm_critic)
+                        critic_log_dict = merge_dict_list(accumulated_critic_logs)
+                        critic_log_dict["critic_grad_norm"] = critic_grad_norm
+                        self.critic_optimizer.step()
                     
                     
-                    self.critic_optimizer.step()
-                    
-                    
-                    # Increase step count
                     self.step += 1
                     
                             
@@ -1362,23 +1264,20 @@ class Trainer:
                         self.generator_optimizer.zero_grad(set_to_none=True)
                     self.critic_optimizer.zero_grad(set_to_none=True)
                     
-                    # Whole-cycle gradient accumulation loop
                     accumulated_generator_logs = []
                     accumulated_critic_logs = []
                     
                     for accumulation_step in range(self.gradient_accumulation_steps):
                         batch = next(self.dataloader)
                         
-                        # Train generator (if needed)
                         if TRAIN_GENERATOR:
                             extra_gen = self.fwdbwd_one_step(batch, True)
                             accumulated_generator_logs.append(extra_gen)
                         
-                        # Train critic
-                        extra_crit = self.fwdbwd_one_step(batch, False)
-                        accumulated_critic_logs.append(extra_crit)
+                        if not self.hsa_skip_critic:
+                            extra_crit = self.fwdbwd_one_step(batch, False)
+                            accumulated_critic_logs.append(extra_crit)
                     
-                    # Compute grad norm and update parameters
                     if TRAIN_GENERATOR:
                         generator_grad_norm = self.model.generator.clip_grad_norm_(self.max_grad_norm_generator)
                         generator_log_dict = merge_dict_list(accumulated_generator_logs)
@@ -1390,19 +1289,19 @@ class Trainer:
                     else:
                         generator_log_dict = {}
                     
-                    critic_grad_norm = self.model.fake_score.clip_grad_norm_(self.max_grad_norm_critic)
-                    critic_log_dict = merge_dict_list(accumulated_critic_logs)
-                    critic_log_dict["critic_grad_norm"] = critic_grad_norm
-                    
-                    self.critic_optimizer.step()
+                    if self.hsa_skip_critic:
+                        critic_log_dict = {}
+                    else:
+                        critic_grad_norm = self.model.fake_score.clip_grad_norm_(self.max_grad_norm_critic)
+                        critic_log_dict = merge_dict_list(accumulated_critic_logs)
+                        critic_log_dict["critic_grad_norm"] = critic_grad_norm
+                        self.critic_optimizer.step()
 
-                    # Increment the step since we finished gradient update
                     self.step += 1
 
                 if self.one_logger is not None:
                     self.one_logger.on_train_batch_end()
 
-                # Create EMA params (if not already created)
                 if (self.step >= self.config.ema_start_step) and \
                         (self.generator_ema is None) and (self.config.ema_weight > 0):
                     if not self.is_lora_enabled:
@@ -1413,13 +1312,11 @@ class Trainer:
                         if self.is_main_process:
                             print(f"EMA creation skipped at step {self.step} (disabled in LoRA mode)")
 
-                # Save the model
                 if (not self.config.no_save) and (self.step - start_step) > 0 and self.step % self.config.log_iters == 0:
                     torch.cuda.empty_cache()
                     self.save()
                     torch.cuda.empty_cache()
 
-                # Logging
                 if self.is_main_process:
                     wandb_loss_dict = {}
                     if TRAIN_GENERATOR and generator_log_dict:
@@ -1433,13 +1330,13 @@ class Trainer:
                         if "hsa_distill_loss" in generator_log_dict:
                             wandb_loss_dict["hsa_distill_loss"] = generator_log_dict["hsa_distill_loss"].mean().item()
 
-
-                    wandb_loss_dict.update(
-                        {
-                            "critic_loss": critic_log_dict["critic_loss"].mean().item(),
-                            "critic_grad_norm": critic_log_dict["critic_grad_norm"].mean().item()
-                        }
-                    )
+                    if critic_log_dict:
+                        wandb_loss_dict.update(
+                            {
+                                "critic_loss": critic_log_dict["critic_loss"].mean().item(),
+                                "critic_grad_norm": critic_log_dict["critic_grad_norm"].mean().item()
+                            }
+                        )
                     if not self.disable_wandb:
                         wandb.log(wandb_loss_dict, step=self.step)
 
@@ -1455,13 +1352,13 @@ class Trainer:
                     if not self.disable_wandb:
                         wandb.log({"per iteration time": iteration_time}, step=self.step)
                     self.previous_time = current_time
-                    # Log training progress
+                    critic_msg = "" if not critic_log_dict else (
+                        f", critic_loss {critic_log_dict['critic_loss'].mean().item()}, "
+                        f"critic_grad_norm {critic_log_dict['critic_grad_norm'].mean().item()}")
                     if TRAIN_GENERATOR and generator_log_dict:
-                        print(f"step {self.step}, per iteration time {iteration_time}, generator_loss {generator_log_dict['generator_loss'].mean().item()}, generator_grad_norm {generator_log_dict['generator_grad_norm'].mean().item()}, dmdtrain_gradient_norm {generator_log_dict['dmdtrain_gradient_norm'].mean().item()}, critic_loss {critic_log_dict['critic_loss'].mean().item()}, critic_grad_norm {critic_log_dict['critic_grad_norm'].mean().item()}")
+                        print(f"step {self.step}, per iteration time {iteration_time}, generator_loss {generator_log_dict['generator_loss'].mean().item()}, generator_grad_norm {generator_log_dict['generator_grad_norm'].mean().item()}, dmdtrain_gradient_norm {generator_log_dict['dmdtrain_gradient_norm'].mean().item()}{critic_msg}")
                     else:
-                        print(f"step {self.step}, per iteration time {iteration_time}, critic_loss {critic_log_dict['critic_loss'].mean().item()}, critic_grad_norm {critic_log_dict['critic_grad_norm'].mean().item()}")
-
-                # ---------------------------------------- Visualization ---------------------------------------------------
+                        print(f"step {self.step}, per iteration time {iteration_time}{critic_msg}")
 
                 if self.vis_interval > 0 and (self.step % self.vis_interval == 0):
                     if self.one_logger is not None:
@@ -1489,7 +1386,6 @@ class Trainer:
                 import traceback
                 traceback.print_exc()
         finally:
-            # Clean up resources
             if self.one_logger is not None:
                 try:
                     self.one_logger.on_train_end()
@@ -1498,13 +1394,10 @@ class Trainer:
                     if self.is_main_process:
                         print(f"[WARNING] Failed to clean up one_logger: {cleanup_e}")
 
-
     def _configure_lora_for_model(self, transformer, model_name):
         """Configure LoRA for a WanDiffusionWrapper model"""
-        # Find all Linear modules in WanAttentionBlock modules
         target_linear_modules = set()
         
-        # Define the specific modules we want to apply LoRA to
         if model_name == 'generator':
             adapter_target_modules = ['CausalWanAttentionBlock']
         elif model_name == 'fake_score':
@@ -1526,7 +1419,6 @@ class Trainer:
                 for module_name in sorted(target_linear_modules):
                     print(f"  - {module_name}")
         
-        # Create LoRA config
         adapter_type = self.lora_config.get('type', 'lora')
         if adapter_type == 'lora':
             peft_config = peft.LoraConfig(
@@ -1534,12 +1426,10 @@ class Trainer:
                 lora_alpha=self.lora_config.get('alpha', None) or self.lora_config.get('rank', 16),
                 lora_dropout=self.lora_config.get('dropout', 0.0),
                 target_modules=target_linear_modules,
-                # task_type="FEATURE_EXTRACTION"        # Remove this; not needed for diffusion models
             )
         else:
             raise NotImplementedError(f'Adapter type {adapter_type} is not implemented')
         
-        # Apply LoRA to the transformer
         lora_model = peft.get_peft_model(transformer, peft_config)
 
         if self.is_main_process:
@@ -1548,25 +1438,20 @@ class Trainer:
 
         return lora_model
 
-
     def _gather_lora_state_dict(self, lora_model):
         "On rank-0, gather FULL_STATE_DICT, then filter only LoRA weights"
         with FSDP.state_dict_type(
-            lora_model,                       # lora_model contains nested FSDP submodules
+            lora_model,
             StateDictType.FULL_STATE_DICT,
             FullStateDictConfig(rank0_only=True, offload_to_cpu=True)
         ):
             full = lora_model.state_dict()
         return get_peft_model_state_dict(lora_model, state_dict=full)
     
-    # --------------------------------------------------------------------------------------------------------------
-    # Visualization helpers
-    # --------------------------------------------------------------------------------------------------------------
 
     def _setup_visualizer(self):
         """Initialize the inference pipeline for visualization on CPU, to be moved to GPU only when needed."""
 
-        # Choose pipeline class depending on causal flag
         if self.config.distribution_loss in ("dmd_switch", "dmd_hsa") or "switch" in self.config.distribution_loss:
             self.vis_pipeline = SwitchCausalInferencePipeline(
                 args=self.config,
@@ -1582,7 +1467,6 @@ class Trainer:
                 text_encoder=self.model.text_encoder,
                 vae=self.model.vae)
 
-        # Visualization output directory (default: <logdir>/vis)
         self.vis_output_dir = os.path.join(os.path.dirname(self.output_path), "vis")
         os.makedirs(self.vis_output_dir, exist_ok=True)
         if self.config.vis_ema:
@@ -1593,7 +1477,6 @@ class Trainer:
         if self.vis_interval <= 0 or not hasattr(self, "vis_pipeline"):
             return
 
-        # Use the fixed batch of prompts/images prepared from val_loader
         if not getattr(self, "fixed_vis_batch", None):
             print("[Warning] No fixed validation batch available for visualization.")
             return
@@ -1615,7 +1498,6 @@ class Trainer:
         if self.config.i2v and ("image" in batch):
             image = batch["image"]
 
-        # Prepare model mode info for filename
         mode_info = ""
         if self.is_lora_enabled:
             mode_info = "_lora"
@@ -1629,7 +1511,6 @@ class Trainer:
             else:
                 videos = self.generate_video(self.vis_pipeline, vid_len, prompts, image=image)
 
-            # Save each sample
             for idx, video_np in enumerate(videos):
                 if isinstance(self.vis_pipeline, SwitchCausalInferencePipeline):
                     video_name = f"step_{self.step:07d}_rank_{dist.get_rank()}_sample_{idx}_len_{vid_len}{mode_info}_switch_frame_{switch_frame_index}.mp4"
@@ -1642,8 +1523,7 @@ class Trainer:
                 video_tensor = torch.from_numpy(video_np.astype("uint8"))
                 write_video(out_path, video_tensor, fps=16)
 
-            # After saving current length videos, release related tensors to reduce peak memory
-            del videos, video_np, video_tensor  # type: ignore
+            del videos, video_np, video_tensor
             torch.cuda.empty_cache()
 
         if self.one_logger is not None:

@@ -491,16 +491,21 @@ class CausalWanSelfAttention(nn.Module):
                     k_coarse_sink, v_coarse_sink = _slice_coarse_cache(0, sink_tokens)
                     if local_budget > 0:
                         local_start_for_window = max(sink_tokens, local_end_index - local_budget)
-                        k_local = temp_k[:, local_start_for_window:local_end_index]
-                        v_local = temp_v[:, local_start_for_window:local_end_index]
-                        k_cat = torch.cat([k_sink, k_local], dim=1)
-                        v_cat = torch.cat([v_sink, v_local], dim=1)
-                        k_coarse_local, v_coarse_local = _slice_coarse_cache(local_start_for_window, local_end_index)
-                        if k_coarse_sink is not None and v_coarse_sink is not None:
-                            k_coarse_cat = torch.cat([k_coarse_sink, k_coarse_local], dim=1)
-                            v_coarse_cat = torch.cat([v_coarse_sink, v_coarse_local], dim=1)
+                        if local_start_for_window == sink_tokens:
+                            k_cat = temp_k[:, :local_end_index]
+                            v_cat = temp_v[:, :local_end_index]
+                            k_coarse_cat, v_coarse_cat = _slice_coarse_cache(0, local_end_index)
                         else:
-                            k_coarse_cat, v_coarse_cat = None, None
+                            k_local = temp_k[:, local_start_for_window:local_end_index]
+                            v_local = temp_v[:, local_start_for_window:local_end_index]
+                            k_cat = torch.cat([k_sink, k_local], dim=1)
+                            v_cat = torch.cat([v_sink, v_local], dim=1)
+                            k_coarse_local, v_coarse_local = _slice_coarse_cache(local_start_for_window, local_end_index)
+                            if k_coarse_sink is not None and v_coarse_sink is not None:
+                                k_coarse_cat = torch.cat([k_coarse_sink, k_coarse_local], dim=1)
+                                v_coarse_cat = torch.cat([v_coarse_sink, v_coarse_local], dim=1)
+                            else:
+                                k_coarse_cat, v_coarse_cat = None, None
                     else:
                         k_cat = k_sink
                         v_cat = v_sink

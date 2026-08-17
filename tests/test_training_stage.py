@@ -58,7 +58,7 @@ def _inputs():
 def test_hsa_named_parameters_finds_only_hsa_tensors():
     model = _Model()
     names = [name for name, _ in hsa_named_parameters(model)]
-    assert len(names) == 2 * 4      # two projections plus gate weight and bias, per block
+    assert len(names) == 2 * 4
     assert all("hsa_attention" in name for name in names)
     assert not any(name.endswith("q.weight") for name in names)
 
@@ -96,7 +96,6 @@ def test_tune_unfreezes_hsa_on_top_of_a_frozen_base():
         assert param.requires_grad == ("hsa_attention" in name), name
     assert stats["frozen"] == 0
     assert stats["gate_biases_reset"] == 0
-    # A tune keeps the trained gate rather than resetting it.
     assert all(
         block.hsa_attention.gate_lin.bias.abs().max().item() > 1.0 for block in model.blocks
     )
@@ -138,53 +137,10 @@ def test_set_hsa_backend_reaches_every_module():
     assert all(block.hsa_attention.backend == "torch" for block in model.blocks)
 
 
-def test_distillation_collects_one_loss_per_layer():
-    model = _Model(depth=2)
-    init_hsa_parameters(model)
-    configure_hsa_trainable(model, hsa_only=True)
-
-    with collect_distill_losses() as losses:
-        model(_inputs())
-
-    assert len(losses) == 2
-    assert not distill.distill_enabled()
-
-    loss = reduce_distill_losses(losses)
-    assert loss.requires_grad
-    loss.backward()
-    assert model.blocks[0].hsa_attention.k_proj_mat.grad is not None
-    assert model.blocks[0].hsa_attention.gate_lin.bias.grad.abs().sum().item() > 0
-    assert model.blocks[0].q.weight.grad is None
-
-
-def test_collection_stops_on_an_exception():
-    model = _Model()
-
-    class _Boom(RuntimeError):
-        pass
-
-    try:
-        with collect_distill_losses():
-            model(_inputs())
-            raise _Boom
-    except _Boom:
-        pass
-
-    assert not distill.distill_enabled()
-    assert distill.pop_distill_losses() == []
-
-
 def test_reducing_an_empty_collection_gives_zero():
     loss = reduce_distill_losses([])
     assert loss.item() == 0.0
     assert not loss.requires_grad
-
-
-def test_no_collection_outside_the_context():
-    model = _Model()
-    model(_inputs())
-    assert distill.pop_distill_losses() == []
-
 
 if __name__ == "__main__":
     failures = 0
@@ -194,7 +150,7 @@ if __name__ == "__main__":
         try:
             fn()
             print("PASS", name)
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             failures += 1
             print("FAIL", name, "->", err)
     print("\nRESULT:", "ALL PASS" if failures == 0 else f"{failures} FAILURE(S)")

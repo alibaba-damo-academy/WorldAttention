@@ -56,12 +56,7 @@ class BaseModel(nn.Module):
             num_frame_per_block: int,
             uniform_timestep: bool = False
     ) -> torch.Tensor:
-        """
-        Randomly generate a timestep tensor based on the generator's task type. It uniformly samples a timestep
-        from the range [min_timestep, max_timestep], and returns a tensor of shape [batch_size, num_frame].
-        - If uniform_timestep, it will use the same timestep for all frames.
-        - If not uniform_timestep, it will use a different timestep for each block.
-        """
+        """Randomly generate a timestep tensor based on the generator's task type."""
         if uniform_timestep:
             timestep = torch.randint(
                 min_timestep,
@@ -79,9 +74,7 @@ class BaseModel(nn.Module):
                 device=self.device,
                 dtype=torch.long
             )
-            # make the noise level the same within every block
             if self.independent_first_frame:
-                # the first frame is always kept the same
                 timestep_from_second = timestep[:, 1:]
                 timestep_from_second = timestep_from_second.reshape(
                     timestep_from_second.shape[0], -1, num_frame_per_block)
@@ -109,20 +102,7 @@ class SelfForcingModel(BaseModel):
         initial_latent: torch.tensor = None,
         slice_last_frames: int = 21,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Optionally simulate the generator's input from noise using backward simulation
-        and then run the generator for one-step.
-        Input:
-            - image_or_video_shape: a list containing the shape of the image or video [B, F, C, H, W].
-            - conditional_dict: a dictionary containing the conditional information (e.g. text embeddings, image embeddings).
-            - unconditional_dict: a dictionary containing the unconditional information (e.g. null/negative text embeddings, null/negative image embeddings).
-            - clean_latent: a tensor containing the clean latents [B, F, C, H, W]. Need to be passed when no backward simulation is used.
-            - initial_latent: a tensor containing the initial latents [B, F, C, H, W].
-        Output:
-            - pred_image: a tensor with shape [B, F, C, H, W].
-            - denoised_timestep: an integer
-        """
-        # Step 1: Sample noise and backward simulate the generator's input
+        """Optionally simulate the generator's input from noise using backward simulation and then run the generator for one-step."""
         assert getattr(self.args, "backward_simulation", True), "Backward simulation needs to be enabled"
         if initial_latent is not None:
             conditional_dict["initial_latent"] = initial_latent
@@ -131,9 +111,6 @@ class SelfForcingModel(BaseModel):
         else:
             noise_shape = image_or_video_shape.copy()
 
-        # During training, the number of generated frames should be uniformly sampled from
-        # [min_num_frames, self.num_training_frames], but still being a multiple of self.num_frame_per_block.
-        # If `min_num_frames` is not provided, we fallback to the original default behaviour.
         min_num_frames = (self.min_num_training_frames - 1) if self.args.independent_first_frame else self.min_num_training_frames
         max_num_frames = self.num_training_frames - 1 if self.args.independent_first_frame else self.num_training_frames
         assert max_num_frames % self.num_frame_per_block == 0
@@ -147,7 +124,6 @@ class SelfForcingModel(BaseModel):
         if self.args.independent_first_frame and initial_latent is None:
             num_generated_frames += 1
             min_num_frames += 1
-        # Sync num_generated_frames across all processes
         noise_shape[1] = num_generated_frames
 
         pred_image_or_video, denoised_timestep_from, denoised_timestep_to = self._consistency_backward_simulation(
@@ -156,19 +132,15 @@ class SelfForcingModel(BaseModel):
             slice_last_frames=slice_last_frames,
             **conditional_dict,
         )
-        # Decide whether to slice based on `slice_last_frames`; when `slice_last_frames == -1`, keep all frames
         if slice_last_frames != -1 and pred_image_or_video.shape[1] > slice_last_frames:
             with torch.no_grad():
-                # Re-encode: take all frames before the last (slice_last_frames - 1) frames for pixel decoding
                 if slice_last_frames > 1:
                     latent_to_decode = pred_image_or_video[:, :-(slice_last_frames - 1), ...]
                 else:
                     latent_to_decode = pred_image_or_video
-                # Decode to video
                 pixels = self.vae.decode_to_pixel(latent_to_decode)
                 frame = pixels[:, -1:, ...].to(self.dtype)
                 frame = rearrange(frame, "b t c h w -> b c t h w")
-                # Encode frame to get image latent
                 image_latent = self.vae.encode_to_latent(frame).to(self.dtype)
             if slice_last_frames > 1:
                 last_frames = pred_image_or_video[:, -(slice_last_frames - 1):, ...]
@@ -179,7 +151,6 @@ class SelfForcingModel(BaseModel):
             pred_image_or_video_sliced = pred_image_or_video
 
         if num_generated_frames != min_num_frames:
-            # Currently, we do not use gradient for the first chunk, since it contains image latents
             gradient_mask = torch.ones_like(pred_image_or_video_sliced, dtype=torch.bool)
             if self.args.independent_first_frame:
                 gradient_mask[:, :1] = False
@@ -197,18 +168,7 @@ class SelfForcingModel(BaseModel):
         slice_last_frames: int = 21,
         **conditional_dict: dict
     ) -> torch.Tensor:
-        """
-        Simulate the generator's input from noise to avoid training/inference mismatch.
-        See Sec 4.5 of the DMD2 paper (https://arxiv.org/abs/2405.14867) for details.
-        Here we use the consistency sampler (https://arxiv.org/abs/2303.01469)
-        Input:
-            - noise: a tensor sampled from N(0, 1) with shape [B, F, C, H, W] where the number of frame is 1 for images.
-            - conditional_dict: a dictionary containing the conditional information (e.g. text embeddings, image embeddings).
-        Output:
-            - output: a tensor with shape [B, T, F, C, H, W].
-            T is the total number of timesteps. output[0] is a pure noise and output[i] and i>0
-            represents the x0 prediction at each timestep.
-        """
+        """Simulate the generator's input from noise to avoid training/inference mismatch."""
         if self.inference_pipeline is None:
             self._initialize_inference_pipeline()
 
@@ -217,14 +177,9 @@ class SelfForcingModel(BaseModel):
         )
 
     def _initialize_inference_pipeline(self):
-        """
-        Lazy initialize the inference pipeline during the first backward simulation run.
-        Here we encapsulate the inference code with a model-dependent outside function.
-        We pass our FSDP-wrapped modules into the pipeline to save memory.
-        """
+        """Lazy initialize the inference pipeline during the first backward simulation run."""
         local_attn_size = getattr(self.args, "model_kwargs", {}).get("local_attn_size", -1)
         slice_last_frames = getattr(self.args, "slice_last_frames", 21)
-        # do not use self.num_training_frames, because it is changed by generator_loss and critic_loss
         num_training_frames = getattr(self.args, "num_training_frames")
         self.inference_pipeline = SelfForcingTrainingPipeline(
             denoising_step_list=self.denoising_step_list,

@@ -1,14 +1,4 @@
-"""Attention self-distillation signal for training the HSA-specific parameters.
-
-The HSA output approximates full attention over the same KV window. When collection is enabled,
-every :class:`~worldattention.hsa.attention.HSAAttention` forward records
-``MSE(hsa_out, dense_out.detach())`` into a process-level registry; a training loop pops and sums
-those per-layer terms and backpropagates them into the fusion gate and the low-rank projections.
-
-This is a per-layer, per-token, every-step signal, which trains the HSA parameters far more
-directly than an end-to-end distribution-matching loss on the final output. Collection is off by
-default and costs nothing when disabled.
-"""
+"""Attention self-distillation signal for training the HSA-specific parameters."""
 from __future__ import annotations
 
 from typing import List
@@ -48,11 +38,7 @@ def record_distill_loss(loss: torch.Tensor) -> None:
 
 
 def dense_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    """Full attention over ``[B, L, H, D]`` tensors: the target HSA is distilled towards.
-
-    The cuDNN attention backend is excluded because it has no execution plan for the long-KV,
-    head-dim-128 shapes this runs on; the flash and memory-efficient backends do.
-    """
+    """Full attention over ``[B, L, H, D]`` tensors: the target HSA is distilled towards."""
     query, key, value = (t.transpose(1, 2) for t in (q, k, v))
     try:
         from torch.nn.attention import SDPBackend, sdpa_kernel

@@ -1,21 +1,4 @@
-"""Training helpers for the HSA parameters.
-
-HSA introduces three parameter groups per attention layer: the two low-rank sequence projections and
-the fusion gate. They are trained in two steps.
-
-**Warmup.** The base model is frozen and only the HSA parameters train, against the per-layer
-attention self-distillation signal from :mod:`worldattention.hsa.distill`. This is a dense,
-every-step target, so the gate opens and the projections move away from their pooling
-initialization quickly and cheaply.
-
-**Tune.** HSA stays active for the final distillation of the generator, so the model is distilled
-under the attention it will use at inference and there is no dense-to-sparse train/test mismatch.
-The HSA parameters remain trainable on top of whatever adapter the host trainer uses, and the
-self-distillation term is kept as a small auxiliary regularizer.
-
-Both steps need HSA enabled on the rollout path, since HSA only replaces attention where a KV cache
-is in use.
-"""
+"""Training helpers for the HSA parameters."""
 from __future__ import annotations
 
 import contextlib
@@ -33,6 +16,7 @@ __all__ = [
     "init_hsa_parameters",
     "configure_hsa_trainable",
     "set_hsa_backend",
+    "configure_hsa_runtime",
     "collect_distill_losses",
     "reduce_distill_losses",
 ]
@@ -41,24 +25,11 @@ _HSA_ATTR = "hsa_attention"
 
 
 def init_hsa_parameters(model: nn.Module) -> int:
-    """Initialize the HSA parameters of a model that is introducing HSA for the first time.
-
-    Only training needs this: a dense base checkpoint has no HSA parameters, and the module
-    allocates them as zeros, which is a degenerate starting point. A zero key projection makes the
-    compressed keys zero, so the linear branch outputs zero and no gradient reaches ``k_proj_mat``
-    at all. Each projection row is therefore initialized to average one block of input tokens, which
-    reproduces the pooled representation the sparse branch routes on and leaves the projection free
-    to move away from it. The fusion gate starts at zero weight and zero bias, i.e. an even mix of
-    the two branches with the sigmoid in its steepest region.
-
-    Returns the number of HSA modules initialized.
-    """
+    """Initialize the HSA parameters of a model that is introducing HSA for the first time."""
     modules = [m for m in model.modules() if isinstance(m, HSAAttention)]
     if not modules:
         return 0
 
-    # After FSDP wrapping the projections are flat shards rather than [rank, seq_len], so gather the
-    # full parameters before writing to them.
     sharded = any(p.dim() != 2 for m in modules for p in (m.k_proj_mat, m.v_proj_mat))
     if sharded:
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -96,22 +67,7 @@ def configure_hsa_trainable(
     desaturate_gate: Optional[bool] = None,
     attr_name: str = _HSA_ATTR,
 ) -> dict:
-    """Set ``requires_grad`` for an HSA training stage.
-
-    With ``hsa_only`` the whole model is frozen except the HSA parameters, which is the warmup
-    configuration. Otherwise the existing trainable set is left alone and the HSA parameters are
-    additionally unfrozen, which is what a tune on top of a frozen base plus adapters needs: an
-    adapter library freezes every non-adapter parameter, which would otherwise leave the gate and
-    the projections frozen for the whole stage.
-
-    ``desaturate_gate`` resets the fusion gate bias to zero. The bias is initialized deeply negative
-    so an untrained gate keeps the sparse branch dominant, but that also puts the sigmoid in a
-    region where its derivative is ~1e-5 and the gate cannot move under gradient descent. Resetting
-    it to zero puts the gate at 0.5 with a healthy gradient. Defaults to the value of ``hsa_only``,
-    so a warmup desaturates and a resumed or already-trained stage does not.
-
-    Returns counts of trainable HSA parameters, frozen parameters and reset gate biases.
-    """
+    """Set ``requires_grad`` for an HSA training stage."""
     if desaturate_gate is None:
         desaturate_gate = hsa_only
 
@@ -146,16 +102,49 @@ def set_hsa_backend(model: nn.Module, backend: str = "auto") -> int:
     return count
 
 
+def configure_hsa_runtime(model: nn.Module, config) -> dict:
+    """Apply the routing options a stage runs with to every HSA module."""
+    backend = str(getattr(config, "hsa_backend", "auto"))
+    kv_granularity = str(getattr(config, "hsa_kv_granularity", "mixed")).lower()
+    tau_min = getattr(config, "hsa_tau_min", None)
+    tau_max = getattr(config, "hsa_tau_max", None)
+    budget_floor = getattr(config, "hsa_budget_floor", None)
+    budget_cap = getattr(config, "hsa_budget_cap", None)
+    frame_seq_length = int(getattr(config, "frame_seq_length", 1560))
+    chunk_frames = int(getattr(config, "num_frame_per_block", 0) or 0)
+
+    applied = 0
+    for module in model.modules():
+        if not isinstance(module, HSAAttention):
+            continue
+        module.backend = backend
+        module.kv_granularity = kv_granularity
+        module.current_chunk_tokens = chunk_frames * frame_seq_length
+        if tau_min is not None:
+            module.tau_min = float(tau_min)
+        if tau_max is not None:
+            module.tau_max = float(tau_max)
+        module.budget_floor = None if budget_floor is None else float(budget_floor)
+        module.budget_cap = None if budget_cap is None else float(budget_cap)
+        module.routing_reuse = bool(getattr(config, "hsa_routing_reuse", False))
+        applied += 1
+
+    return {
+        "modules": applied,
+        "backend": backend,
+        "kv_granularity": kv_granularity,
+        "current_chunk_tokens": chunk_frames * frame_seq_length,
+        "tau": (tau_min, tau_max),
+        "budget": (budget_floor, budget_cap),
+        "routing_reuse": bool(getattr(config, "hsa_routing_reuse", False)),
+    }
+
+
 @contextmanager
+
+
 def collect_distill_losses():
-    """Collect per-layer HSA-to-dense losses for the forward passes inside the block.
-
-    The collected terms are yielded as a list once the block exits::
-
-        with collect_distill_losses() as losses:
-            chunk = rollout_one_chunk(requires_grad=True)
-        aux = reduce_distill_losses(losses)
-    """
+    """Collect per-layer HSA-to-dense losses for the forward passes inside the block."""
     collected: list = []
     distill.enable_distill(True)
     try:

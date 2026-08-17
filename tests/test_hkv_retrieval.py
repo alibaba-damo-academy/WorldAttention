@@ -76,8 +76,33 @@ def test_stage2_pools_pages_across_candidate_chunks():
     got = [candidates.index(next(c for c in candidates if c[0] == cid and c[1] == pid))
            for cid, pid, _ in selected]
     assert got == expected
-    # Selection is not confined to one chunk.
     assert len({cid for cid, _, _ in selected}) > 1
+
+
+def test_stage2_caps_what_one_chunk_contributes():
+    """One page per chunk spreads the budget over the history instead of one moment of it."""
+    torch.manual_seed(0)
+    query = torch.randn(DIM)
+    candidates = [(0, page, query + 0.01 * torch.randn(DIM)) for page in range(4)]
+    candidates += [(chunk, page, torch.randn(DIM)) for chunk in (1, 2, 3) for page in range(4)]
+
+    assert len({cid for cid, _, _ in select_topk_pages(query, candidates, topk=4)}) == 1
+
+    capped = select_topk_pages(query, candidates, topk=4, max_per_chunk=1)
+    assert len(capped) == 4
+    assert len({cid for cid, _, _ in capped}) == 4
+    scores = torch.stack([c[2] for c in candidates[:4]]) @ query / math.sqrt(DIM)
+    assert next(pid for cid, pid, _ in capped if cid == 0) == int(scores.argmax())
+
+
+def test_stage2_cap_falls_back_to_the_chunks_available():
+    """Fewer chunks than the budget simply installs fewer pages; nothing is duplicated."""
+    torch.manual_seed(0)
+    query = torch.randn(DIM)
+    candidates = [(0, page, torch.randn(DIM)) for page in range(4)]
+
+    selected = select_topk_pages(query, candidates, topk=4, max_per_chunk=1)
+    assert len(selected) == 1 and selected[0][0] == 0
     assert [s for _, _, s in selected] == sorted([s for _, _, s in selected], reverse=True)
 
 
@@ -143,7 +168,6 @@ def test_page_key_index_returns_none_without_pages():
         frame_seq_length=4, start_frame=0, temporal_freqs=torch.ones(4, 2, dtype=torch.complex64),
     ) is None
 
-
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):
@@ -152,7 +176,7 @@ if __name__ == "__main__":
         try:
             fn()
             print("PASS", name)
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             failures += 1
             print("FAIL", name, "->", err)
     print("\nRESULT:", "ALL PASS" if failures == 0 else f"{failures} FAILURE(S)")

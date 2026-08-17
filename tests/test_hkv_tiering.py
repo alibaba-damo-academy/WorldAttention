@@ -1,4 +1,4 @@
-"""Multi-tier residency: LRU order, NVMe spill and reload, backups. CPU only."""
+"""Page residency: pool reuse, LRU demotion, NVMe spill and reload."""
 import os
 import shutil
 import sys
@@ -8,103 +8,152 @@ import torch
 
 from pipeline.hkv import HKVTierManager
 
+LAYERS, BATCH, PAGE_TOKENS, HEADS, HEAD_DIM = 2, 1, 4, 1, 2
+GEOMETRY = dict(
+    layers=LAYERS, batch=BATCH, page_tokens=PAGE_TOKENS,
+    heads=HEADS, head_dim=HEAD_DIM, dtype=torch.float32,
+)
 
-def _blob(tag: int) -> dict:
-    return {"k": [torch.full((2, 2), float(tag))], "v": [torch.full((2, 2), -float(tag))]}
+
+def _manager(device="cpu", **kwargs):
+    tier = HKVTierManager(**kwargs)
+    tier.configure(device=torch.device(device), **GEOMETRY)
+    return tier
 
 
-def test_resident_chunks_round_trip():
-    tier = HKVTierManager(cpu_max_chunks=4)
-    for cid in range(3):
-        tier.put(cid, _blob(cid))
-    for cid in range(3):
-        assert tier.location(cid) == "cpu"
-        assert torch.equal(tier.get(cid)["k"][0], torch.full((2, 2), float(cid)))
-    assert tier.get(99) is None
-    assert tier.location(99) == "absent"
+def _fill(tier, key, value):
+    tier.allocate(key).fill_(float(value))
+
+
+def _value(page):
+    return float(page.flatten()[0].item())
+
+
+def test_a_page_round_trips_through_the_cpu_tier():
+    tier = _manager()
+    for page_id in range(3):
+        _fill(tier, (0, page_id), page_id + 1)
+    for page_id in range(3):
+        assert tier.location((0, page_id)) == "cpu"
+        assert _value(tier.get((0, page_id))) == page_id + 1
+    assert tier.get((9, 9)) is None
+    assert tier.location((9, 9)) == "absent"
+
+
+def test_cpu_slots_are_reused_rather_than_reallocated():
+    """The steady state must not allocate: fresh host buffers every block were the old bottleneck."""
+    tier = _manager(cpu_max_pages=2)
+    for page_id in range(6):
+        _fill(tier, (0, page_id), page_id)
+    assert tier._cpu_allocated == 2
+    assert len(tier._cpu) <= 2
 
 
 def test_over_capacity_drops_the_least_recently_used_without_nvme():
-    tier = HKVTierManager(cpu_max_chunks=2)
-    tier.put(0, _blob(0))
-    tier.put(1, _blob(1))
-    tier.get(0)                      # 0 becomes the most recently used
-    tier.put(2, _blob(2))
+    tier = _manager(cpu_max_pages=2)
+    _fill(tier, (0, 0), 1)
+    _fill(tier, (0, 1), 2)
+    tier.get((0, 0))
+    _fill(tier, (0, 2), 3)
 
-    assert tier.location(1) == "absent"
-    assert tier.location(0) == "cpu"
-    assert tier.location(2) == "cpu"
-    assert tier.stats()["n_drops"] == 1
-    assert tier.stats()["n_spills"] == 0
+    assert tier.location((0, 1)) == "absent"
+    assert tier.location((0, 0)) == "cpu"
+    assert tier.stats()["drops"] == 1
 
 
-def test_capacity_is_never_below_one():
-    tier = HKVTierManager(cpu_max_chunks=0)
-    tier.put(0, _blob(0))
-    assert tier.location(0) == "cpu"
-
-
-def test_nvme_spills_and_reloads():
+def test_spilled_pages_come_back_from_nvme():
     tmp = tempfile.mkdtemp()
     try:
-        tier = HKVTierManager(cpu_max_chunks=2, nvme_enabled=True, nvme_dir=tmp)
-        for cid in range(3):
-            tier.put(cid, _blob(cid))
+        tier = _manager(cpu_max_pages=1, nvme_enabled=True, nvme_dir=tmp)
+        _fill(tier, (0, 0), 7)
+        _fill(tier, (0, 1), 8)
 
-        assert tier.location(0) == "nvme"
-        assert tier.stats()["n_spills"] == 1
-        assert len(os.listdir(tmp)) == 1
-
-        reloaded = tier.get(0)
-        assert torch.equal(reloaded["k"][0], torch.full((2, 2), 0.0))
-        assert tier.location(0) == "cpu"
-        assert tier.stats()["n_loads"] == 1
-        assert tier.stats()["n_drops"] == 0
+        assert tier.location((0, 0)) == "nvme"
+        assert _value(tier.get((0, 0))) == 7
+        assert tier.stats()["spills"] >= 1 and tier.stats()["loads"] == 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_nvme_keeps_a_full_backup_so_respilling_is_free():
+def test_an_unchanged_page_is_written_to_nvme_once():
     tmp = tempfile.mkdtemp()
     try:
-        tier = HKVTierManager(cpu_max_chunks=1, nvme_enabled=True, nvme_dir=tmp)
-        tier.put(0, _blob(0))
-        tier.put(1, _blob(1))            # spills 0, writes its backup
-        assert tier.stats()["n_spills"] == 1
-
-        tier.get(0)                      # reload 0, spilling 1
-        tier.put(2, _blob(2))            # spills 0 again, reusing the existing backup
-
-        assert tier.stats()["backups"] == len(os.listdir(tmp))
-        assert torch.equal(tier.get(0)["k"][0], torch.full((2, 2), 0.0))
+        tier = _manager(cpu_max_pages=1, nvme_enabled=True, nvme_dir=tmp)
+        _fill(tier, (0, 0), 1)
+        for page_id in range(1, 4):
+            _fill(tier, (0, page_id), page_id)
+            tier.get((0, 0))
+        assert tier.stats()["spills"] >= 3
+        assert len(os.listdir(tmp)) == 4
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_nvme_requires_a_directory():
-    try:
-        HKVTierManager(cpu_max_chunks=1, nvme_enabled=True)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("expected a missing nvme_dir to be rejected")
-
-
-def test_cleanup_removes_files_and_state():
+def test_cleanup_removes_the_spilled_files():
     tmp = tempfile.mkdtemp()
     try:
-        tier = HKVTierManager(cpu_max_chunks=1, nvme_enabled=True, nvme_dir=tmp)
-        tier.put(0, _blob(0))
-        tier.put(1, _blob(1))
-        assert len(os.listdir(tmp)) == 1
-
+        tier = _manager(cpu_max_pages=1, nvme_enabled=True, nvme_dir=tmp)
+        _fill(tier, (0, 0), 1)
+        _fill(tier, (0, 1), 2)
+        assert os.listdir(tmp)
         tier.cleanup()
         assert os.listdir(tmp) == []
-        assert tier.stats()["cpu_resident"] == 0
-        assert tier.location(0) == "absent"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+
+def test_clear_keeps_the_pools_but_forgets_the_pages():
+    tier = _manager(cpu_max_pages=4)
+    for page_id in range(3):
+        _fill(tier, (0, page_id), page_id)
+    allocated = tier._cpu_allocated
+    tier.clear()
+
+    assert tier.location((0, 0)) == "absent"
+    assert tier._cpu_allocated == allocated
+    _fill(tier, (1, 0), 5)
+    assert tier._cpu_allocated == allocated
+
+
+def test_discard_returns_the_storage():
+    tier = _manager(cpu_max_pages=4)
+    _fill(tier, (0, 0), 1)
+    tier.discard((0, 0))
+    assert tier.location((0, 0)) == "absent"
+    _fill(tier, (0, 1), 2)
+    assert tier._cpu_allocated == 1
+
+
+def test_gpu_tier_takes_new_pages_and_demotes_the_oldest():
+    if not torch.cuda.is_available():
+        print("SKIP (no CUDA)", end=" ")
+        return
+    tier = _manager(device="cuda", gpu_max_pages=2, cpu_max_pages=4)
+    _fill(tier, (0, 0), 1)
+    _fill(tier, (0, 1), 2)
+    assert tier.location((0, 0)) == "gpu" and tier.location((0, 1)) == "gpu"
+
+    _fill(tier, (0, 2), 3)
+    assert tier.location((0, 0)) == "cpu"
+    assert tier.location((0, 2)) == "gpu"
+    assert tier.stats()["demotions"] == 1
+    assert _value(tier.get((0, 0))) == 1
+
+
+def test_gpu_tier_does_not_evict_to_serve_a_read():
+    """Promoting on a read must never push out a page the same install still needs."""
+    if not torch.cuda.is_available():
+        print("SKIP (no CUDA)", end=" ")
+        return
+    tier = _manager(device="cuda", gpu_max_pages=1, cpu_max_pages=4)
+    _fill(tier, (0, 0), 1)
+    _fill(tier, (0, 1), 2)
+    assert tier.location((0, 1)) == "gpu"
+
+    assert _value(tier.get((0, 0))) == 1
+    assert tier.location((0, 0)) == "cpu"
+    assert tier.location((0, 1)) == "gpu"
+    assert tier.stats()["promotions"] == 0
 
 if __name__ == "__main__":
     failures = 0
@@ -114,7 +163,7 @@ if __name__ == "__main__":
         try:
             fn()
             print("PASS", name)
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             failures += 1
             print("FAIL", name, "->", err)
     print("\nRESULT:", "ALL PASS" if failures == 0 else f"{failures} FAILURE(S)")

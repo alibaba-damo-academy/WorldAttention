@@ -1,17 +1,4 @@
-"""Temporal rotary-embedding re-rotation for reused KV pages.
-
-A KV cache stores keys that already carry the rotary encoding of the frame they were generated at.
-HKV needs two operations on top of that:
-
-* a retrieved page is replayed at a new cache position, so its baked-in temporal rotation must be
-  shifted by a constant frame delta;
-* to score a page's keys against a pre-rotation query, the per-token temporal rotation must be
-  removed to recover the content-space key.
-
-Rotary embedding for a video latent is a per-position complex multiply split into (temporal,
-height, width) bands. Moving a token along the frame axis only touches the temporal band, so
-neither operation needs to reconstruct the spatial bands.
-"""
+"""Temporal rotary-embedding re-rotation for reused KV pages."""
 from __future__ import annotations
 
 import torch
@@ -53,11 +40,7 @@ def shift_temporal_rope(
     new_frame0: int,
     orig_frame0: int,
 ) -> torch.Tensor:
-    """Move a page of keys from ``orig_frame0`` to ``new_frame0``.
-
-    All tokens of a page share one frame delta, so a single rotation factor is exact for the page.
-    ``k`` is ``[..., tokens, H, head_dim]``.
-    """
+    """Move a page of keys from ``orig_frame0`` to ``new_frame0``."""
     num_temporal = temporal_complex_dims(k.shape[-1])
     factor = _factor(
         temporal_freqs,
@@ -72,10 +55,7 @@ def derope_temporal(
     temporal_freqs: torch.Tensor,
     frame_ids: torch.Tensor,
 ) -> torch.Tensor:
-    """Remove each token's own temporal rotation, recovering content-space keys.
-
-    ``k`` is ``[B, tokens, H, head_dim]`` and ``frame_ids`` is the absolute frame of each token.
-    """
+    """Remove each token's own temporal rotation, recovering content-space keys."""
     num_temporal = temporal_complex_dims(k.shape[-1])
     factor = _factor(temporal_freqs, torch.zeros_like(frame_ids), frame_ids)
     factor = factor.view(*([1] * (k.dim() - 3)), frame_ids.shape[0], 1, num_temporal)

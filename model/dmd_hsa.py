@@ -1,14 +1,14 @@
 # Adopted from https://github.com/guandeh17/Self-Forcing
 # SPDX-License-Identifier: Apache-2.0
 from model.dmd_switch import DMDSwitch
-from pipeline.hsa_streaming_switch_training import HSAStreamingSwitchTrainingPipeline
+from pipeline.hkv_streaming_switch_training import HKVStreamingSwitchTrainingPipeline
 
 
 class DMDHSA(DMDSwitch):
     """Prompt-switch DMD stage whose rollout runs with HSA as the active attention."""
 
     def _initialize_inference_pipeline(self):
-        self.inference_pipeline = HSAStreamingSwitchTrainingPipeline(
+        self.inference_pipeline = HKVStreamingSwitchTrainingPipeline(
             denoising_step_list=self.denoising_step_list,
             scheduler=self.scheduler,
             generator=self.generator,
@@ -21,4 +21,6 @@ class DMDHSA(DMDSwitch):
             global_sink=getattr(self.args, "global_sink", False),
             enable_hsa=getattr(self.args, "enable_hsa", True),
             hsa_backend=getattr(self.args, "hsa_backend", "auto"),
+            hier_kv=getattr(self.args, "hier_kv", None),
+            num_output_frames=int(getattr(self.args, "streaming_max_length", 0) or 0),
         )

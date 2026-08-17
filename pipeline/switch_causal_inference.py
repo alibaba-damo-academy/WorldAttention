@@ -12,7 +12,7 @@ import torch
 
 from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
 from utils.memory import gpu, get_cuda_free_memory_gb, move_model_to_device_with_memory_preservation
-from pipeline.causal_inference import CausalInferencePipeline  # reuse init utilities
+from pipeline.causal_inference import CausalInferencePipeline
 import torch.distributed as dist
 
 
@@ -30,24 +30,18 @@ class SwitchCausalInferencePipeline(CausalInferencePipeline):
         super().__init__(args, device, generator=generator, text_encoder=text_encoder, vae=vae)
         self.global_sink = getattr(args, "global_sink", False)
 
-    # Internal helpers
     def _recache_after_switch(self, output, current_start_frame, new_conditional_dict):
         if not self.global_sink:
-            # reset kv cache
             for block_idx in range(self.num_transformer_blocks):
                 cache = self.kv_cache1[block_idx]
                 cache["k"].zero_()
                 cache["v"].zero_()
-                # cache["global_end_index"].zero_()
-                # cache["local_end_index"].zero_()
             
-        # reset cross-attention cache
         for blk in self.crossattn_cache:
             blk["k"].zero_()
             blk["v"].zero_()
             blk["is_init"] = False
         
-        # recache
         if current_start_frame == 0:
             return
 
@@ -55,14 +49,12 @@ class SwitchCausalInferencePipeline(CausalInferencePipeline):
         recache_start_frame = current_start_frame - num_recache_frames
 
         frames_to_recache = output[:, recache_start_frame:current_start_frame]
-        # move to gpu
         if frames_to_recache.device.type == 'cpu':
             target_device = next(self.generator.parameters()).device
             frames_to_recache = frames_to_recache.to(target_device)
         batch_size = frames_to_recache.shape[0]
         print(f"num_recache_frames: {num_recache_frames}, recache_start_frame: {recache_start_frame}, current_start_frame: {current_start_frame}")
         
-        # prepare blockwise causal mask
         device = frames_to_recache.device
         block_mask = self.generator.model._prepare_blockwise_causal_attn_mask(
             device=device,
@@ -87,7 +79,6 @@ class SwitchCausalInferencePipeline(CausalInferencePipeline):
                 current_start=recompute_start_frame * self.frame_seq_length,
             )
 
-        # reset cross-attention cache
         for blk in self.crossattn_cache:
             blk["k"].zero_()
             blk["v"].zero_()
@@ -104,18 +95,11 @@ class SwitchCausalInferencePipeline(CausalInferencePipeline):
         return_latents: bool = False,
         low_memory: bool = False,
     ):
-        """Generate video with prompt switch.
-
-        Notes (differences from base inference):
-            text_prompts_first: prompt list used before switching (aligned with batch)
-            text_prompts_second: prompt list used after switching
-            switch_frame_index: 0-based frame index; frames >= this value use the second prompt
-        """
+        """Generate video with prompt switch."""
         batch_size, num_output_frames, num_channels, height, width = noise.shape
         assert num_output_frames % self.num_frame_per_block == 0
         num_blocks = num_output_frames // self.num_frame_per_block
 
-        # Encode both prompts upfront
         cond_first = self.text_encoder(text_prompts=text_prompts_first)
         cond_second = self.text_encoder(text_prompts=text_prompts_second)
 
@@ -125,7 +109,6 @@ class SwitchCausalInferencePipeline(CausalInferencePipeline):
                 self.text_encoder, target_device=gpu, preserved_memory_gb=gpu_memory_preservation
             )
 
-        # Place output on CPU to save GPU memory
         output_device = torch.device('cpu') if low_memory else noise.device
         output = torch.zeros(
             [batch_size, num_output_frames, num_channels, height, width],
@@ -136,11 +119,9 @@ class SwitchCausalInferencePipeline(CausalInferencePipeline):
         local_attn_cfg = getattr(self.args.model_kwargs, "local_attn_size", -1)
         kv_policy = ""
         if local_attn_cfg != -1:
-            # local attention
             kv_cache_size = local_attn_cfg * self.frame_seq_length
             kv_policy = f"int->local, size={local_attn_cfg}"
         else:
-            # global attention
             kv_cache_size = num_output_frames * self.frame_seq_length
             kv_policy = "global (-1)"
         print(f"kv_cache_size: {kv_cache_size} (policy: {kv_policy}, frame_seq_length: {self.frame_seq_length}, num_output_frames: {num_output_frames})")
@@ -163,7 +144,6 @@ class SwitchCausalInferencePipeline(CausalInferencePipeline):
         print(f"[inference] local_attn_size set on model: {self.generator.model.local_attn_size}")
         self._set_all_modules_max_attention_size(self.local_attn_size)
 
-        # Temporal denoising by blocks
         all_num_frames = [self.num_frame_per_block] * num_blocks
 
         using_second = False
@@ -179,7 +159,6 @@ class SwitchCausalInferencePipeline(CausalInferencePipeline):
             
             noisy_input = noise[:, current_start_frame - num_input_frames : current_start_frame + current_num_frames - num_input_frames]
 
-            # Spatial denoising loop (same as parent but uses cond_in_use)
             for index, current_timestep in enumerate(self.denoising_step_list):
                 timestep = torch.ones([batch_size, current_num_frames], device=noise.device, dtype=torch.int64) * current_timestep
                 if index < len(self.denoising_step_list) - 1:
@@ -209,7 +188,6 @@ class SwitchCausalInferencePipeline(CausalInferencePipeline):
 
             output[:, current_start_frame : current_start_frame + current_num_frames] = denoised_pred.to(output.device)
 
-            # rerun with clean context noise for cache update
             context_timestep = torch.ones_like(timestep) * self.args.context_noise
             self.generator(
                 noisy_image_or_video=denoised_pred,
@@ -222,7 +200,6 @@ class SwitchCausalInferencePipeline(CausalInferencePipeline):
 
             current_start_frame += current_num_frames
 
-        # Standard decoding
         video = self.vae.decode_to_pixel(output.to(noise.device), use_cache=False)
         video = (video * 0.5 + 0.5).clamp(0, 1)
 

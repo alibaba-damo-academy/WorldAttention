@@ -14,13 +14,7 @@ import torch.distributed as dist
 
 
 class StreamingSwitchTrainingPipeline(StreamingTrainingPipeline):
-    """Training pipeline supporting mid-video prompt switching.
-
-    Use case: In a single roll-out, the first half of the video uses prompt-1. Once the
-    switch frame is reached, only the high-level self-attention KV cache is refreshed and
-    all cross-attention caches are reset, then generation continues with prompt-2 for the
-    remaining frames.
-    """
+    """Training pipeline supporting mid-video prompt switching."""
 
     def __init__(
         self,
@@ -42,30 +36,10 @@ class StreamingSwitchTrainingPipeline(StreamingTrainingPipeline):
         switch_recache_frames: Optional[torch.Tensor] = None,
         return_sim_step: bool = False,
     ) -> Tuple[torch.Tensor, Optional[int], Optional[int]]:
-        """
-        Chunk generation method tailored for sequential training with prompt switching.
-
-        Args:
-            noise: noise of a single chunk [batch_size, chunk_frames, C, H, W]
-            conditional_dict: initial conditional information
-            kv_cache: external KV cache
-            crossattn_cache: external cross-attention cache
-            current_start_frame: start frame index of the chunk in the full sequence
-            requires_grad: whether gradients are required
-            switch_frame_index: switch frame index (relative to chunk start)
-            switch_conditional_dict: conditional info after switching
-            switch_recache_frames: frames used to recache during switch (the 21 frames before switch_index)
-            return_sim_step: whether to return simulation step info
-
-        Returns:
-            output: generated chunk [batch_size, chunk_frames, C, H, W]
-            denoised_timestep_from: starting denoise timestep
-            denoised_timestep_to: ending denoise timestep
-        """
+        """Chunk generation method tailored for sequential training with prompt switching."""
 
         
         
-        # If no switch info, fall back to the parent implementation
         if switch_conditional_dict is None or switch_frame_index is None:
             return super().generate_chunk_with_cache(
                 noise=noise,
@@ -81,16 +55,13 @@ class StreamingSwitchTrainingPipeline(StreamingTrainingPipeline):
         num_blocks = chunk_frames // self.num_frame_per_block
         all_num_frames = [self.num_frame_per_block] * num_blocks
 
-        # Prepare output
         output = torch.zeros_like(noise)
         
-        # Randomly select denoising steps (synced across ranks)
         num_denoising_steps = len(self.denoising_step_list)
         exit_flags = self.generate_and_sync_list(len(all_num_frames), num_denoising_steps, device=noise.device)
         
-        # Determine the gradient-enabled range
         if not requires_grad:
-            start_gradient_frame_index = chunk_frames  # Out of range: no gradients anywhere
+            start_gradient_frame_index = chunk_frames
         else:
             start_gradient_frame_index = switch_frame_index
         
@@ -116,7 +87,6 @@ class StreamingSwitchTrainingPipeline(StreamingTrainingPipeline):
             
             noisy_input = noise[:, local_start_frame:local_start_frame + current_num_frames]
             
-            # Spatial denoising loop
             for step_idx, current_timestep in enumerate(self.denoising_step_list):
                 exit_flag = (
                     step_idx == exit_flags[0]
@@ -131,7 +101,6 @@ class StreamingSwitchTrainingPipeline(StreamingTrainingPipeline):
                 ) * current_timestep
                 
                 if not exit_flag:
-                    # Intermediate steps: no gradients
                     with torch.no_grad():
                         _, denoised_pred = self.generator(
                             noisy_image_or_video=noisy_input,
@@ -142,7 +111,6 @@ class StreamingSwitchTrainingPipeline(StreamingTrainingPipeline):
                             current_start=(current_start_frame + local_start_frame) * self.frame_seq_length,
                         )
                         
-                        # Add noise for the next step
                         if step_idx < len(self.denoising_step_list) - 1:
                             next_timestep = self.denoising_step_list[step_idx + 1]
                             noisy_input = self.scheduler.add_noise(
@@ -153,7 +121,6 @@ class StreamingSwitchTrainingPipeline(StreamingTrainingPipeline):
                                 ),
                             ).unflatten(0, denoised_pred.shape[:2])
                 else:
-                    # Final step may require gradients
                     enable_grad = local_start_frame >= start_gradient_frame_index
                     
                     
@@ -169,10 +136,8 @@ class StreamingSwitchTrainingPipeline(StreamingTrainingPipeline):
                         )
                     break
             
-            # Record output
             output[:, local_start_frame:local_start_frame + current_num_frames] = denoised_pred
             
-            # Update cache using context noise
             context_timestep = torch.ones_like(timestep) * self.context_noise
             context_noisy = self.scheduler.add_noise(
                 denoised_pred.flatten(0, 1),
@@ -192,7 +157,6 @@ class StreamingSwitchTrainingPipeline(StreamingTrainingPipeline):
             
             local_start_frame += current_num_frames
         
-        # Compute returned timestep information
         if not self.same_step_across_blocks:
             denoised_timestep_from, denoised_timestep_to = None, None
         elif exit_flags[0] == len(self.denoising_step_list) - 1:
@@ -215,15 +179,11 @@ class StreamingSwitchTrainingPipeline(StreamingTrainingPipeline):
 
     def _recache_after_switch(self, output, current_start_frame, new_conditional_dict, local_start_frame=None, switch_recache_frames=None):
         if not self.global_sink:
-            # reset kv cache
             for block_idx in range(self.num_transformer_blocks):
                 cache = self.kv_cache1[block_idx]
                 cache["k"].zero_()
                 cache["v"].zero_()
-                # cache["global_end_index"].zero_()
-                # cache["local_end_index"].zero_()
             
-        # reset cross-attention cache
         for blk in self.crossattn_cache:
             blk["k"].zero_()
             blk["v"].zero_()
@@ -236,23 +196,18 @@ class StreamingSwitchTrainingPipeline(StreamingTrainingPipeline):
             frames_to_recache = torch.cat([switch_recache_frames, output], dim=1)[:, -21:, ...]
             num_recache_frames = frames_to_recache.shape[1]
         else:
-            # Determine how to fetch frames based on whether local_start_frame is provided
             if local_start_frame is not None:
-                # Chunk mode: output is the current chunk's output; use relative coordinates
                 num_recache_frames = min(local_start_frame, 21)
                 frames_to_recache = output[:, -num_recache_frames:]
             else:
-                # Full sequence mode: output is the complete sequence; use absolute coordinates
                 num_recache_frames = min(current_start_frame, 21)
                 frames_to_recache = output[:, -num_recache_frames:]
             
         batch_size, num_recache_frames, c, h, w = frames_to_recache.shape
         
         
-        # Create an appropriate BlockMask for recomputation
         device = frames_to_recache.device
         
-        # Use the standard blockwise causal mask
         block_mask = self.generator.model._prepare_blockwise_causal_attn_mask(
             device=device,
             num_frames=num_recache_frames,
@@ -261,11 +216,9 @@ class StreamingSwitchTrainingPipeline(StreamingTrainingPipeline):
             local_attn_size=21
         )
         
-        # Prepare time steps
         context_timestep = torch.ones([batch_size, num_recache_frames], 
                                     device=device, dtype=torch.int64) * self.context_noise
         
-        # Set the new block_mask
         self.generator.model.block_mask = block_mask
         with torch.no_grad():
             self.generator(
@@ -277,7 +230,6 @@ class StreamingSwitchTrainingPipeline(StreamingTrainingPipeline):
                 current_start=(current_start_frame - num_recache_frames) * self.frame_seq_length,
             )
 
-        # reset cross-attention cache
         for blk in self.crossattn_cache:
             blk["k"].zero_()
             blk["v"].zero_()

@@ -20,8 +20,6 @@ wandb
 # Wan cross-attention uses FlashAttention.
 flash-attn>=2.7
 
-# Optional: enables the Triton block-sparse backend for the HSA sparse branch.
-# triton>=3.0
 
 # Optional: sequence parallelism for Wan's own sampler (wan/distributed).
 # xfuser>=0.4

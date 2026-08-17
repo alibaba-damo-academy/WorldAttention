@@ -1,29 +1,21 @@
 # Adopted from https://github.com/guandeh17/Self-Forcing
 # SPDX-License-Identifier: Apache-2.0
-"""Interactive long-video generation with prompt switching backed by a hierarchical KV cache.
-
-Generation proceeds chunk by chunk. When the driving prompt changes, the window that has just been
-generated is archived into the KV bank as a chunk, and two-stage retrieval installs the ``K_p`` pages
-of history most relevant to the incoming prompt. That replaces the baseline behaviour of re-running
-the model over recent frames to rebuild the cache, which costs a full forward pass per switch and
-still only ever sees the sliding window.
-
-Set ``hier_kv.enabled: false`` to fall back to that re-cache baseline.
-"""
+"""Interactive long-video generation whose only memory is a hierarchical KV cache."""
 from typing import List, Optional
+
+import time
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
 from pipeline.causal_inference import CausalInferencePipeline
-from pipeline.hkv import HKVCache, query_index
-from pipeline.hkv.rope import temporal_band
+from pipeline.hkv import HKVBlockCycle
 from utils.memory import gpu, get_cuda_free_memory_gb, move_model_to_device_with_memory_preservation
 from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
 
 
-class InteractiveCausalInferencePipeline(CausalInferencePipeline):
+class InteractiveCausalInferencePipeline(HKVBlockCycle, CausalInferencePipeline):
     def __init__(
         self,
         args,
@@ -35,98 +27,25 @@ class InteractiveCausalInferencePipeline(CausalInferencePipeline):
     ):
         super().__init__(args, device, generator=generator, text_encoder=text_encoder, vae=vae)
         self.global_sink = getattr(args, "global_sink", False)
+        self.recache_after_switch = bool(getattr(args, "recache_after_switch", False))
 
         cfg = getattr(args, "hier_kv", None)
-        self.hier_kv_enabled = bool(getattr(cfg, "enabled", False)) if cfg is not None else False
-        if self.hier_kv_enabled:
-            nvme = getattr(cfg, "nvme", None)
-            nvme_enabled = bool(getattr(nvme, "enabled", False)) if nvme is not None else False
-            nvme_dir = str(getattr(nvme, "path", "") or "") if nvme is not None else ""
-            self.hkv = HKVCache(
-                frame_seq_length=self.frame_seq_length,
-                page_size_frames=int(getattr(cfg, "page_size_frames", 8)),
-                topk_pages=int(getattr(cfg, "topk_pages", 4)),
-                stage1_topk_chunks=int(getattr(cfg, "stage1_topk_chunks", 1)),
-                cpu_max_chunks=int(getattr(cfg, "cpu_max_chunks", 64)),
-                nvme_enabled=nvme_enabled,
-                nvme_dir=nvme_dir or None,
-                rerope=bool(getattr(cfg, "rerope_retrieved", True)),
-            )
-        else:
-            self.hkv = None
-
-    # ------------------------------------------------------------------ model-coupled accessors
-    def _temporal_freqs(self) -> torch.Tensor:
-        """Temporal rotary band of the model's frequency table, on the KV cache device."""
-        head_dim = int(self.kv_cache1[0]["k"].shape[-1])
-        return temporal_band(self.generator.model.freqs, head_dim).to(self.kv_cache1[0]["k"].device)
-
-    def _query_index(self, noisy_chunk: torch.Tensor) -> Optional[torch.Tensor]:
-        """Stage-2 query vector for the incoming chunk.
-
-        Taken from the first block's attention query before the rotary embedding is applied, which
-        is the space the page key index lives in. Returns None when the chunk is empty.
-        """
-        if noisy_chunk is None or noisy_chunk.numel() == 0:
-            return None
-        model = self.generator.model
-        attn = model.blocks[0].self_attn
-        with torch.no_grad():
-            pooled = []
-            for sample in noisy_chunk.permute(0, 2, 1, 3, 4):
-                tokens = model.patch_embedding(sample.unsqueeze(0)).flatten(2).transpose(1, 2)
-                pooled.append(query_index(attn.norm_q(attn.q(tokens))))
-            return torch.stack(pooled, dim=0).mean(dim=0)
-
-    def _hsa_modules(self) -> Optional[list]:
-        """Per-block HSA modules, or None when the cache carries no compressed tier."""
-        if "k_coarse" not in self.kv_cache1[0]:
-            return None
-        return [block.self_attn.hsa_attention for block in self.generator.model.blocks]
+        self.hier_kv_enabled = self.hkv_configure(
+            cfg, model=self.generator.model,
+            num_output_frames=int(getattr(args, "num_output_frames", 0)),
+        )
+        if self.hier_kv_enabled and (not dist.is_initialized() or dist.get_rank() == 0):
+            print(f"[HKV] page = block = {self.num_frame_per_block} frames; region = "
+                  f"{self.hkv.topk_pages} retrieved pages + pinned newest = {self.hkv_region_frames} frames "
+                  f"(newest pinned: {self.hkv.pin_last_page}, resident bonus {self.hkv.resident_bonus}, "
+                  f"index layers {self.hkv.index_layers}); cache = {self.local_attn_size} frames; "
+                  f"recache pinned page on switch: {self.hkv_recache_pinned_on_switch}")
 
     def _reset_crossattn_cache(self):
         for cache in self.crossattn_cache:
             cache["k"].zero_()
             cache["v"].zero_()
             cache["is_init"] = False
-
-    # ------------------------------------------------------------------ prompt switching
-    def _switch_via_hkv(self, conditional_dict, next_conditional_dict, noisy_chunk,
-                        current_start_frame: int) -> bool:
-        """Archive the current window, then install the pages the new prompt needs.
-
-        Returns False when the bank had nothing to install, so the caller can fall back to the
-        re-cache baseline.
-        """
-        temporal_freqs = self._temporal_freqs()
-        self.hkv.store(
-            self.kv_cache1,
-            prompt_embeds=conditional_dict["prompt_embeds"],
-            current_start_frame=current_start_frame,
-            temporal_freqs=temporal_freqs,
-        )
-        self._reset_crossattn_cache()
-
-        pages = self.hkv.retrieve(
-            prompt_embeds=next_conditional_dict["prompt_embeds"],
-            query_vec=self._query_index(noisy_chunk),
-        )
-        if not pages:
-            return False
-
-        installed = self.hkv.apply(
-            self.kv_cache1,
-            pages,
-            current_start_frame=current_start_frame,
-            temporal_freqs=temporal_freqs,
-            hsa_modules=self._hsa_modules(),
-        )
-        if not dist.is_initialized() or dist.get_rank() == 0:
-            print(
-                f"[HKV] installed {len(pages)} page(s) "
-                f"({installed // self.frame_seq_length} frames) from {len(self.hkv)} banked chunk(s)"
-            )
-        return installed > 0
 
     def _recache_after_switch(self, output, current_start_frame, conditional_dict):
         """Baseline switch handling: replay recent frames through the model to rebuild the cache."""
@@ -139,7 +58,7 @@ class InteractiveCausalInferencePipeline(CausalInferencePipeline):
                     cache["v_coarse"].zero_()
 
         self._reset_crossattn_cache()
-        if current_start_frame == 0:
+        if current_start_frame == 0 or not self.recache_after_switch:
             return
 
         num_recache_frames = (
@@ -174,7 +93,6 @@ class InteractiveCausalInferencePipeline(CausalInferencePipeline):
             )
         self._reset_crossattn_cache()
 
-    # ------------------------------------------------------------------ generation
     def inference(
         self,
         noise: torch.Tensor,
@@ -184,16 +102,7 @@ class InteractiveCausalInferencePipeline(CausalInferencePipeline):
         return_latents: bool = False,
         low_memory: bool = False,
     ):
-        """Generate a video, switching prompts at the given frame indices.
-
-        Args:
-            noise: ``(B, T, C, H, W)`` latent noise.
-            text_prompts_list: one prompt list per segment, aligned with the batch.
-            switch_frame_indices: frame index at which each segment after the first takes over;
-                length is ``len(text_prompts_list) - 1``.
-            return_latents: also return the latent tensor.
-            low_memory: keep the output on CPU and swap the text encoder in on demand.
-        """
+        """Generate a video, switching prompts at the given frame indices."""
         batch_size, num_output_frames, num_channels, height, width = noise.shape
         assert len(text_prompts_list) >= 1, "text_prompts_list must not be empty"
         assert len(switch_frame_indices) == len(text_prompts_list) - 1, (
@@ -202,6 +111,7 @@ class InteractiveCausalInferencePipeline(CausalInferencePipeline):
         assert num_output_frames % self.num_frame_per_block == 0
         num_blocks = num_output_frames // self.num_frame_per_block
 
+        self._denoise_seconds = 0.0
         cond_list = [self.text_encoder(text_prompts=prompts) for prompts in text_prompts_list]
 
         if low_memory:
@@ -219,11 +129,10 @@ class InteractiveCausalInferencePipeline(CausalInferencePipeline):
         )
 
         if self.hkv is not None:
-            self.hkv.reset()
+            self.hkv_reset()
 
-        local_attn_cfg = getattr(self.args.model_kwargs, "local_attn_size", -1)
         kv_cache_size = (
-            local_attn_cfg * self.frame_seq_length if local_attn_cfg != -1
+            int(self.local_attn_size) * self.frame_seq_length if self.local_attn_size not in (None, -1)
             else num_output_frames * self.frame_seq_length
         )
         self._initialize_kv_cache(
@@ -245,23 +154,19 @@ class InteractiveCausalInferencePipeline(CausalInferencePipeline):
         current_start_frame = 0
         segment_idx = 0
         next_switch_pos = switch_frame_indices[0] if switch_frame_indices else None
+        previous_latent = None
+        staged_region = None
 
         for _ in range(num_blocks):
             current_num_frames = self.num_frame_per_block
 
+            switching = False
             if next_switch_pos is not None and current_start_frame >= next_switch_pos:
-                previous_cond = cond_list[segment_idx]
                 segment_idx += 1
-                next_cond = cond_list[segment_idx]
-                noisy_chunk = noise[:, current_start_frame:current_start_frame + current_num_frames]
-
-                switched = False
-                if self.hkv is not None:
-                    switched = self._switch_via_hkv(
-                        previous_cond, next_cond, noisy_chunk, current_start_frame,
-                    )
-                if not switched:
-                    self._recache_after_switch(output, current_start_frame, next_cond)
+                switching = True
+                self._reset_crossattn_cache()
+                if self.hkv is None:
+                    self._recache_after_switch(output, current_start_frame, cond_list[segment_idx])
 
                 next_switch_pos = (
                     switch_frame_indices[segment_idx]
@@ -271,8 +176,31 @@ class InteractiveCausalInferencePipeline(CausalInferencePipeline):
                     print(f"[interactive] segment {segment_idx} at frame {current_start_frame}")
 
             conditional_dict = cond_list[segment_idx]
+
+            if self.hkv is not None:
+                self.hkv_before_block(
+                    self.kv_cache1, conditional_dict, current_start_frame,
+                    staged=staged_region, switching=switching, last_latent=previous_latent,
+                    generator=self.generator, crossattn_cache=self.crossattn_cache,
+                    context_noise=int(self.args.context_noise),
+                )
+                staged_region = None
+            else:
+                for hsa_module in getattr(self, "_hsa_attention_modules", []):
+                    hsa_module.stable_kv_tokens = 0
+                    hsa_module.begin_decode_block()
+
+            next_start_frame = current_start_frame + current_num_frames
+            if self.hkv is not None and len(self.hkv) > 0 and next_start_frame < num_output_frames:
+                next_segment = segment_idx
+                if next_switch_pos is not None and next_start_frame >= next_switch_pos:
+                    next_segment = min(segment_idx + 1, len(cond_list) - 1)
+                staged_region = self.hkv_stage(self.kv_cache1, cond_list[next_segment], next_start_frame)
+
             noisy_input = noise[:, current_start_frame:current_start_frame + current_num_frames]
 
+            torch.cuda.current_stream().synchronize()
+            _denoise_t0 = time.perf_counter()
             for index, current_timestep in enumerate(self.denoising_step_list):
                 timestep = torch.ones(
                     [batch_size, current_num_frames], device=noise.device, dtype=torch.int64
@@ -301,21 +229,35 @@ class InteractiveCausalInferencePipeline(CausalInferencePipeline):
                 denoised_pred.to(output.device)
             )
 
-            # Replay the chunk at the context timestep so the cache holds clean keys and values.
-            self.generator(
-                noisy_image_or_video=denoised_pred,
-                conditional_dict=conditional_dict,
-                timestep=torch.ones_like(timestep) * self.args.context_noise,
-                kv_cache=self.kv_cache1,
-                crossattn_cache=self.crossattn_cache,
-                current_start=current_start_frame * self.frame_seq_length,
-            )
+            with self.hkv_capture_qbar():
+                self.generator(
+                    noisy_image_or_video=denoised_pred,
+                    conditional_dict=conditional_dict,
+                    timestep=torch.ones_like(timestep) * self.args.context_noise,
+                    kv_cache=self.kv_cache1,
+                    crossattn_cache=self.crossattn_cache,
+                    current_start=current_start_frame * self.frame_seq_length,
+                )
 
+            torch.cuda.current_stream().synchronize()
+            self._denoise_seconds += time.perf_counter() - _denoise_t0
+
+            if self.hkv is not None:
+                self.hkv_after_block(self.kv_cache1, conditional_dict, current_start_frame)
+
+            previous_latent = denoised_pred
             current_start_frame += current_num_frames
 
         video = self.vae.decode_to_pixel(output.to(noise.device), use_cache=False)
         video = (video * 0.5 + 0.5).clamp(0, 1)
 
+        if not dist.is_initialized() or dist.get_rank() == 0:
+            pixel_frames = 4 * num_output_frames - 3
+            print(f"[timing] denoise-only: {self._denoise_seconds:.2f}s for {num_output_frames} "
+                  f"latents ({pixel_frames} pixel frames) = "
+                  f"{pixel_frames / max(self._denoise_seconds, 1e-9):.1f} FPS")
+            if self.hkv is not None:
+                print(f"[HKV] retrieval summary: {self.hkv_stats_summary()}")
         if return_latents:
             return video, output
         return video

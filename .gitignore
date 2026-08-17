@@ -11,3 +11,6 @@ videos/
 logs*/
 wandb*/
 .hkv_nvme_cache/
+
+# experiment artifacts; the appended results.jsonl in each experiment is tracked, the runs are not
+exp/*/runs/

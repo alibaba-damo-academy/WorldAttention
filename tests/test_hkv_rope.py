@@ -119,7 +119,6 @@ def test_positions_beyond_the_table_are_clamped():
     out = shift_temporal_rope(x.unsqueeze(0), band, MAX_POSITIONS + 100, 0)
     assert torch.isfinite(out).all()
 
-
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(dict(globals()).items()):
@@ -128,7 +127,7 @@ if __name__ == "__main__":
         try:
             fn()
             print("PASS", name)
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             failures += 1
             print("FAIL", name, "->", err)
     print("\nRESULT:", "ALL PASS" if failures == 0 else f"{failures} FAILURE(S)")

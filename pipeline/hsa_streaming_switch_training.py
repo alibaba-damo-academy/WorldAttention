@@ -1,27 +1,13 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 # SPDX-License-Identifier: Apache-2.0
-"""Streaming prompt-switch rollout with HSA as the active attention.
-
-HSA replaces attention only where a KV cache is in use, so the rollout that feeds the distillation
-objective has to run with the HSA backend installed. Enabling it here means the final distillation
-sees the same attention the model will use at inference, rather than distilling under dense
-attention and swapping in sparse attention afterwards.
-"""
+"""Streaming prompt-switch rollout with HSA as the active attention."""
 import torch.distributed as dist
 
 from pipeline.streaming_switch_training import StreamingSwitchTrainingPipeline
-from wan.modules.hsa import resolve_backend
 
 
 class HSAStreamingSwitchTrainingPipeline(StreamingSwitchTrainingPipeline):
-    """Streaming switch training pipeline with the HSA KV-cache backend enabled.
-
-    Args:
-        enable_hsa: install HSA on the rollout path.
-        hsa_backend: sparse-branch backend, ``"auto"`` / ``"triton"`` / ``"torch"``. The gradient
-            path resolves its own backend inside the attention module; this attribute governs the
-            no-grad rollout steps.
-    """
+    """Streaming switch training pipeline with the HSA KV-cache backend enabled."""
 
     def __init__(self, *args, enable_hsa: bool = True, hsa_backend: str = "auto", **kwargs):
         super().__init__(*args, **kwargs)
@@ -61,5 +47,5 @@ class HSAStreamingSwitchTrainingPipeline(StreamingSwitchTrainingPipeline):
         if is_main:
             print(
                 f"[HSA-Train] Enabled the HSA KV-cache backend on {enabled_count} attention modules "
-                f"(sparse branch: {self.hsa_backend} -> {resolve_backend(self.hsa_backend)})."
+                f"(sparse branch: {self.hsa_backend})."
             )

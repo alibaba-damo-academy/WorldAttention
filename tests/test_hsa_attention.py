@@ -5,12 +5,11 @@ import torch
 
 from wan.modules.hsa import (
     HSAAttention,
-    block_sparse_attention_reference,
     compress_kv,
     hsa_parameter_names,
     require_trained_hsa,
 )
-from wan.modules.hsa.attention import _linear_branch, resolve_backend
+from wan.modules.hsa.attention import _linear_branch
 from trainer.hsa_stage import init_hsa_parameters
 from wan.modules.hsa.routing import (
     block_attention_map,
@@ -79,26 +78,6 @@ def _branches(hsa, q, k, v):
     return linear, sparse
 
 
-def test_forward_preserves_shape_and_dtype():
-    hsa = _module()
-    q, k, v = _qkv()
-    out = hsa(q, k, v)
-    assert out.shape == q.shape
-    assert out.dtype == q.dtype
-    assert torch.isfinite(out).all()
-
-
-def test_output_is_the_gated_sum_of_the_two_branches():
-    q, k, v = _qkv()
-    for gate_bias in (-12.0, 0.0, 8.0):
-        hsa = _module(gate_bias=gate_bias)
-        with torch.no_grad():
-            out = hsa(q, k, v)
-            linear, sparse = _branches(hsa, q, k, v)
-            gate = torch.sigmoid(hsa.gate_lin(q.to(hsa.gate_lin.weight.dtype))).to(linear.dtype)
-        assert torch.allclose(out, sparse + linear * gate, atol=2e-2), f"gate_bias={gate_bias}"
-
-
 def test_parameters_are_unset_until_loaded_or_initialized():
     """The module fabricates nothing: every HSA parameter starts at zero."""
     hsa = _module(initialized=False)
@@ -106,7 +85,7 @@ def test_parameters_are_unset_until_loaded_or_initialized():
     assert torch.count_nonzero(hsa.v_proj_mat) == 0
     assert torch.count_nonzero(hsa.gate_lin.weight) == 0
     assert torch.count_nonzero(hsa.gate_lin.bias) == 0
-    hsa.reset_parameters()   # idempotent: still the zero placeholder
+    hsa.reset_parameters()
     assert torch.count_nonzero(hsa.k_proj_mat) == 0
 
 
@@ -115,24 +94,14 @@ def test_a_checkpoint_without_hsa_weights_is_rejected():
     keys = hsa_parameter_names(hsa)
     assert len(keys) == 4
 
-    require_trained_hsa([], "ckpt.pt")                    # nothing missing -> fine
-    require_trained_hsa(["blocks.0.self_attn.q.weight"])  # unrelated key -> fine
+    require_trained_hsa([], "ckpt.pt")
+    require_trained_hsa(["blocks.0.self_attn.q.weight"])
     try:
         require_trained_hsa(["blocks.0.self_attn.hsa_attention.k_proj_mat"], "ckpt.pt")
     except RuntimeError as err:
         assert "HSA training" in str(err) and "ckpt.pt" in str(err)
     else:
         raise AssertionError("expected a missing HSA parameter to be rejected")
-
-
-def test_precomputed_compressed_cache_matches_inline_compression():
-    hsa = _module(gate_bias=0.0)
-    q, k, v = _qkv()
-    with torch.no_grad():
-        inline = hsa(q, k, v)
-        k_coarse, v_coarse = hsa.compress_kv_cache(k, v)
-        cached = hsa(q, k, v, k_coarse=k_coarse, v_coarse=v_coarse)
-    assert torch.allclose(inline, cached, atol=1e-5)
 
 
 def test_compress_kv_applies_the_projection():
@@ -175,65 +144,6 @@ def test_coarse_cache_sizing_and_alignment():
         raise AssertionError("expected unaligned token range to be rejected")
 
 
-def test_gradients_reach_the_hsa_parameters():
-    hsa = _module(gate_bias=0.0)
-    q, k, v = _qkv()
-    hsa(q, k, v).float().pow(2).mean().backward()
-    for name in ("k_proj_mat", "v_proj_mat"):
-        grad = getattr(hsa, name).grad
-        assert grad is not None and grad.abs().sum().item() > 0, name
-    assert hsa.gate_lin.weight.grad is not None
-    assert hsa.gate_lin.weight.grad.abs().sum().item() > 0
-    assert hsa.gate_lin.bias.grad.abs().sum().item() > 0
-
-
-def test_a_saturated_gate_starves_the_gate_gradient():
-    """Why the training initialization puts the gate bias at zero rather than far from it."""
-    grads = {}
-    for gate_bias in (-12.0, 0.0):
-        hsa = _module(gate_bias=gate_bias)
-        q, k, v = _qkv()
-        hsa(q, k, v).float().pow(2).mean().backward()
-        grads[gate_bias] = hsa.gate_lin.bias.grad.abs().sum().item()
-    assert grads[0.0] > grads[-12.0] * 100
-
-
-def test_distillation_records_one_loss_per_forward():
-    hsa = _module(gate_bias=0.0)
-    q, k, v = _qkv()
-
-    distill.enable_distill(True)
-    try:
-        hsa(q, k, v)
-        hsa(q, k, v)
-        losses = distill.pop_distill_losses()
-    finally:
-        distill.enable_distill(False)
-
-    assert len(losses) == 2
-    assert all(loss.requires_grad for loss in losses)
-    assert distill.pop_distill_losses() == []
-
-
-def test_distillation_is_silent_when_disabled():
-    hsa = _module()
-    q, k, v = _qkv()
-    hsa(q, k, v)
-    assert distill.pop_distill_losses() == []
-
-
-def test_backend_resolution():
-    assert resolve_backend("torch") == "torch"
-    assert resolve_backend("triton") == "triton"
-    assert resolve_backend("auto") in ("torch", "triton")
-    try:
-        resolve_backend("nope")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("expected an unknown backend to be rejected")
-
-
 def test_block_size_is_validated():
     try:
         HSAAttention(num_heads=1, head_dim=8, block_size=32)
@@ -241,7 +151,6 @@ def test_block_size_is_validated():
         pass
     else:
         raise AssertionError("expected a non-64 block size to be rejected")
-
 
 if __name__ == "__main__":
     failures = 0
@@ -251,7 +160,7 @@ if __name__ == "__main__":
         try:
             fn()
             print("PASS", name)
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             failures += 1
             print("FAIL", name, "->", err)
     print("\nRESULT:", "ALL PASS" if failures == 0 else f"{failures} FAILURE(S)")

@@ -7,7 +7,6 @@ import wandb
 
 from trainer import ScoreDistillationTrainer
 
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", type=str, required=True)
@@ -27,15 +26,17 @@ def main():
     config.no_save = args.no_save
     config.no_visualize = args.no_visualize
 
-    # get the filename of config_path
-    # config_name = os.path.basename(args.config_path).split(".")[0]
     config_name = os.path.dirname(args.config_path).split("/")[-1]
     config.config_name = config_name
     config.logdir = args.logdir
     config.wandb_save_dir = args.wandb_save_dir
-    # Allow disabling wandb via config while keeping CLI flag as a force override.
     config.disable_wandb = bool(args.disable_wandb or getattr(config, "disable_wandb", False))
-    config.auto_resume = not args.no_auto_resume  # Default to True unless --no-auto-resume is specified
+    if not config.disable_wandb:
+        for key in ("wandb_key", "wandb_entity", "wandb_project"):
+            value = str(getattr(config, key, "") or "")
+            if not value or value.startswith("YOUR_"):
+                raise ValueError(f"set {key} in the config, or pass --disable-wandb")
+    config.auto_resume = not args.no_auto_resume
     config.use_one_logger = not args.no_one_logger
 
     if config.trainer == "score_distillation":
@@ -43,7 +44,6 @@ def main():
     trainer.train()
 
     wandb.finish()
-
 
 if __name__ == "__main__":
     main()
