@@ -4,7 +4,7 @@
 
 <h1 align="center">WorldAttention: An Efficient Attention Architecture for Interactive Video World Models</h1>
 
-<!-- <h3 align="center">2026</h3> -->
+<h3 align="center">NeurIPS 2026 Reviewed (5/5/5 - Accept/Accept/Accept)</h3>
 
 <p align="center">
   <a href="#"><img src="https://img.shields.io/badge/Paper-B31B1B?style=for-the-badge&logo=arxiv&logoColor=white" alt="Paper"></a>
