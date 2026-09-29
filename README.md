@@ -7,9 +7,9 @@
 <h3 align="center">NeurIPS 2026 Reviewed (5/5/5 - Accept/Accept/Accept)</h3>
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/Paper-B31B1B?style=for-the-badge&logo=arxiv&logoColor=white" alt="Paper"></a>
-  <a href="#"><img src="https://img.shields.io/badge/Project%20Page-000000?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Project Page"></a>
-  <a href="#"><img src="https://img.shields.io/badge/HF_Paper-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black" alt="Dataset"></a>
+  <a href="https://arxiv.org/abs/2609.34606"><img src="https://img.shields.io/badge/Paper-B31B1B?style=for-the-badge&logo=arxiv&logoColor=white" alt="Paper"></a>
+  <a href="https://alibaba-damo-academy.github.io/WorldAttention/"><img src="https://img.shields.io/badge/Project%20Page-000000?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Project Page"></a>
+  <a href="https://huggingface.co/papers/2609.34606"><img src="https://img.shields.io/badge/HF_Paper-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black" alt="HF_Paper"></a>
 </p>
 
 <p align="center">
