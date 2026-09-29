@@ -118,7 +118,7 @@ Model weights are read from `models/` by default, and prompt lists from `prompts
   title   = {WorldAttention: An Efficient Attention Architecture for Interactive Video World Models},
   author  = {Zhang, Zeyu and Mao, Jinyuan and An, Dakai and Zhao, Wangbo and Lu, Hanfeng and
              Tang, Jiasheng and Yu, Yinghao and Wang, Wei and Zhuang, Bohan},
-  journal = {arXiv preprint arXiv:XXXX.XXXXX},
+  journal = {arXiv preprint arXiv:2609.34606},
   year    = {2026}
 }
 ```
