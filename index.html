@@ -1,0 +1,2284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WorldAttention: An Efficient Attention Architecture for Interactive Video World Models</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Raleway:wght@600&display=block" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@100..900&display=block" rel="stylesheet">
+    <!-- Favicon -->
+    <link rel="icon" type="image/png" href="https://avatars.githubusercontent.com/u/79640140?s=200&v=4">
+
+<style>
+    @font-face {
+        font-family: 'Roboto';
+        font-style: normal;
+        font-stretch: 100%;
+        font-display: block;
+        font-weight: 300 700;
+        src: url(https://cdn.seaweed-apt.com/assets/fonts/roboto.woff2) format('woff2');
+        unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+    }
+
+    * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+    }
+    
+    body {
+        font-family: "Outfit", sans-serif;
+        background-color: #000000;
+        color: #fff;
+        line-height: 1.6;
+    }
+    
+    .container {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 0 20px;
+    }
+
+    .footer {
+        background-color: #000000; /* deep navy */
+        padding: 1.5rem 1rem;
+        margin-top: 1.5rem;
+        margin-bottom: 1.5rem;
+        text-align: center;
+      }
+      
+    .footer p {
+    color: #ffffff;
+    font-size: 0.95rem;
+    margin: 0;
+    }
+    
+    .footer strong {
+    color: #000000; /* cyan accent */
+    }
+      
+
+    a {
+        color: #ddd;
+        text-decoration: underline;
+    }
+
+    a:visited {
+        color: #ddd;
+    }
+
+    /* Common text styles */
+    p {
+        margin-bottom: 20px;
+        font-size: 18px;
+        color: #ddd;
+    }
+
+    h1 {
+        font-size: 50px;
+        margin-top: 50px;
+        margin-bottom: 20px;
+        font-weight: 400;
+        line-height: 1.0;
+    }
+
+    .review-subtitle {
+        margin: 0 0 20px;
+        font-size: clamp(18px, 2.2vw, 26px);
+        font-weight: 700;
+        line-height: 1.35;
+    }
+
+    .review-subtitle a,
+    .review-subtitle a:visited {
+        color: inherit;
+        text-decoration: none;
+    }
+
+    .section-title {
+        font-size: 28px;
+        margin: 100px 0 30px;
+        font-weight: 400;
+    }
+
+    .method-figure {
+        margin: 0 0 48px;
+    }
+
+    .method-figure img {
+        display: block;
+        width: 70%;
+        height: auto;
+        margin: 0 auto;
+        border-radius: 8px;
+    }
+
+    .method-figure figcaption {
+        max-width: 1200px;
+        margin: 18px auto 0;
+        color: #ddd;
+        font-size: 16px;
+        line-height: 1.6;
+        text-align: center;
+    }
+
+    /* Header styles */
+    header {
+        text-align: center;
+        padding: 80px 0 50px;
+    }
+    
+    .author {
+        font-size: 18px;
+        color: #aaa;
+        padding: 20px 6px 0;
+        text-align: center;
+        transition: color 0.3s;
+        text-decoration: none;
+    }
+
+    .author-a {
+        font-size: 18px;
+        color: #fff;
+        padding: 20px 6px 0;
+        text-align: center;
+        transition: color 0.3s;
+        text-decoration: none;
+    }
+
+    .author:visited {
+        color: #aaa;
+    }
+
+    .corresponding-author {
+        padding-top: 0; 
+        font-size: 16px;
+    }
+
+    .author-a:visited {
+        color: #fff;
+    }
+
+    .author-a:hover {
+        color: #444;
+    }
+
+    .button {
+        display: inline-block;
+        background-color: rgba(255, 255, 255, 0.1);
+        color: #fff;
+        padding: 8px 16px;
+        border-radius: 20px;
+        font-size: 18px;
+        margin: 50px 0 30px;
+        transition: background-color 0.3s;
+        text-decoration: none;
+    }
+
+    .button:hover {
+        color: #fff;
+        background-color: #444;
+    }
+    
+    /* Media containers */
+    .vimeo-container {
+        border-radius: 8px;
+        overflow: hidden;
+        flex: 1 1 auto;
+        min-height: 300px;
+        width: 100%;
+    }
+    
+    .media-grid {
+        display: flex;
+        gap: 20px;
+        margin: 40px 0;
+        align-items: stretch; 
+        flex-wrap: nowrap;
+    }
+    
+    .media-grid.wrap {
+        flex-wrap: wrap;
+    }
+    
+    .media-item {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        width: 100%;
+    }
+    
+    .media-grid .media-item {
+        flex: 1 1 0;
+        min-width: 0;
+    }
+    
+    .media-grid > .media-item:only-child {
+        flex: 1 0 100%;
+        max-width: 100%;
+    }
+    
+    .image-container {
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        width: 100%;
+    }
+    
+    .media-item img, 
+    .media-item video {
+        max-height: 100%;
+        max-width: 100%;
+        object-fit: contain;
+        border-radius: 8px;
+        display: block;
+    }
+    
+    .media-caption {
+        margin-top: 8px;
+        font-size: 16px;
+        color: #ddd;
+        text-align: center;
+        width: 100%;
+    }
+    
+    .comparison-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        align-items: start;
+        row-gap: 32px;
+    }
+
+    .method-name {
+        margin: 0 0 12px;
+        font-size: 22px;
+        font-weight: 400;
+        line-height: 1.3;
+        text-align: center;
+    }
+
+    .method-name strong { font-weight: 700; }
+
+    .comparison-grid .image-container {
+        height: auto;
+        max-height: none;
+    }
+
+    .comparison-grid video {
+        width: 100%;
+        height: auto;
+    }
+
+    @media (max-width: 1100px) {
+        .comparison-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 640px) {
+        .comparison-grid { grid-template-columns: 1fr; }
+    }
+
+    /* Flex column grid */
+    .flex-column-grid {
+        display: flex;
+        gap: 20px;
+        margin: 40px 0;
+        width: 100%;
+    }
+
+    .column {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+    }
+
+    .column .image-container {
+        width: 100%;
+        position: relative;
+        border-radius: 8px;
+        overflow: hidden;
+        background-color: #0f1112;
+    }
+
+    .column video, 
+    .column img {
+        width: 100%;
+        height: auto;
+        display: block;
+        border-radius: 8px;
+    }
+
+    .column .media-caption {
+        margin-top: 10px;
+    }
+
+    /* Video player styles */
+    .video-container {
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        width: 100%;
+        border-radius: 8px;
+        margin-bottom: 15px;
+    }
+    
+    .video-player-section {
+        width: 100%;
+        position: relative;
+        border-radius: 8px;
+        overflow: hidden;
+        background-color: #000;
+    }
+
+    .video-player-section video {
+        width: 100%;
+        display: block;
+        border-radius: 8px;
+    }
+    
+    .vimeo-embed {
+        position: relative;
+        width: 100%;
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    
+    .video-controls {
+        position: relative;
+        margin-top: -10px;
+    }
+    
+    .video-timeline {
+        position: relative;
+        height: 6px;
+        width: 100%;
+        background-color: rgba(255, 255, 255, 0.2);
+        cursor: pointer;
+        border-radius: 3px;
+    }
+    
+    .video-progress {
+        position: absolute;
+        height: 100%;
+        width: 0%;
+        background-color: #fff;
+        border-radius: 3px;
+        transition: width 0.1s ease;
+    }
+    
+    .video-time {
+        color: #fff;
+        font-size: 16px;
+        margin-top: 4px;
+        text-align: right;
+    }
+    
+    /* Scenes list styles */
+    .scenes-list {
+        width: 100%;
+        height: 90px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        background-color: rgba(30, 30, 30, 0.9);
+        border-radius: 8px;
+        display: flex;
+        flex-direction: row;
+        margin-top: -10px;
+        padding: 5px;
+    }
+
+    .scene-item {
+        display: flex;
+        flex-direction: column;
+        padding: 5px;
+        border-right: 1px solid #2c3237;
+        cursor: pointer;
+        transition: background-color 0.2s;
+        min-width: 100px;
+        max-width: 100px;
+        border-radius: 4px;
+        margin: 0 2px;
+        align-items: flex-start;
+        justify-content: flex-start;
+    }
+
+    .scene-item:hover,
+    .scene-item.active {
+        background-color: #2c3237;
+    }
+
+    .scene-thumbnail {
+        width: auto;
+        display: inline-block;
+        margin: 0 0 4px 0;
+        border-radius: 4px;
+        overflow: hidden;
+        background-color: #0f1112;
+        text-align: left;
+    }
+
+    .scene-thumbnail img {
+        border-radius: 0;
+        display: block;
+        width: auto;
+        height: auto;
+        max-width: 60px;
+        object-fit: contain;
+    }
+
+    .scene-info {
+        width: 100%;
+        text-align: left;
+    }
+        
+    .scene-title,
+    .scene-description {
+        font-size: 10px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    
+    .scene-description {
+        color: #a0a0a0;
+    }
+    
+    .comparison-grid .scenes-list {
+        height: 122px;
+        align-items: stretch;
+    }
+
+    .comparison-grid .scene-item {
+        flex: 0 0 108px;
+        min-width: 108px;
+        max-width: 108px;
+        justify-content: center;
+        gap: 4px;
+        padding: 8px;
+        border: 0;
+        background: transparent;
+        color: #fff;
+        font: inherit;
+        text-align: left;
+    }
+
+    .comparison-grid .scene-item:hover,
+    .comparison-grid .scene-item.active,
+    .comparison-grid .scene-item:focus-visible {
+        background: #2c3237;
+    }
+
+    .comparison-grid .scene-item:focus-visible {
+        outline: 1px solid #a0a0a0;
+        outline-offset: -1px;
+    }
+
+    .comparison-grid .scene-title,
+    .comparison-grid .scene-description { width: 100%; }
+
+    .comparison-grid .scene-title { font-weight: 600; }
+
+    .comparison-grid .scene-thumbnail {
+        display: block;
+        width: 100%;
+        height: auto;
+        aspect-ratio: 26 / 15;
+        margin: 0;
+        flex-shrink: 0;
+    }
+
+    .comparison-grid .scene-thumbnail img {
+        width: 100%;
+        height: 100%;
+        max-width: none;
+        object-fit: cover;
+    }
+
+    .prompt-tooltip {
+        position: fixed;
+        z-index: 1000;
+        width: min(360px, calc(100vw - 24px));
+        padding: 14px 16px;
+        border: 1px solid #42464b;
+        border-radius: 10px;
+        background: #191c20;
+        color: #f4f4f4;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+        pointer-events: none;
+        text-align: left;
+        overflow-wrap: anywhere;
+    }
+
+    .prompt-tooltip[hidden] { display: none; }
+
+    .prompt-tooltip strong { font-size: 12px; }
+
+    .prompt-tooltip p {
+        margin: 6px 0 0;
+        color: #ddd;
+        font-size: 14px;
+        line-height: 1.55;
+        white-space: normal;
+    }
+
+    /* Scrollbar customization */
+    .scenes-list::-webkit-scrollbar {
+        height: 6px;
+    }
+    
+    .scenes-list::-webkit-scrollbar-track {
+        background: #1a1e21;
+        border-radius: 3px;
+    }
+    
+    .scenes-list::-webkit-scrollbar-thumb {
+        background-color: #2c3237;
+        border-radius: 3px;
+    }
+    
+    .scenes-list::-webkit-scrollbar-thumb:hover {
+        background-color: #3f454a;
+    }
+    
+    /* Composable layout */
+    .composable-layout {
+        display: flex;
+        gap: 20px;
+        margin: 40px 0;
+        align-items: flex-start;
+    }
+    
+    .composable-inputs {
+        width: 50%;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+    }
+    
+    .composable-input-item {
+        width: 100%;
+    }
+    
+    .composable-input-item .image-container,
+    .composable-output .image-container {
+        width: 100%;
+        background-color: #14556e;
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    
+    .composable-input-item img,
+    .composable-input-item video,
+    .composable-output video {
+        display: block;
+        width: 100%;
+        height: auto;
+    }
+
+    .composable-output {
+        width: 70%;
+    }
+
+    .composable-figure {
+        width: 70%;
+    }
+    
+    /* Responsive styles */
+    @media (max-width: 768px) {
+        h1 {
+            font-size: 32px;
+        }
+        
+        p {
+            font-size: 16px;
+        }
+
+        .section-title {
+            font-size: 24px;
+            margin: 60px 0 20px;
+        }
+        
+        .author, .author-a {
+            font-size: 16px;
+        }
+        
+        .corresponding-author {
+            font-size: 14px;
+        }
+        
+        .button {
+            font-size: 14px;
+            padding: 6px 14px;
+        }
+        
+        .media-grid {
+            flex-direction: column;
+        }
+        
+        .media-grid .media-item {
+            flex: 1 0 100%;
+            max-width: 100%;
+        }
+        
+        .image-container {
+            height: auto;
+            max-height: 360px;
+            width: 100%;
+        }
+        
+        .flex-column-grid {
+            flex-direction: column;
+        }
+        
+        .column {
+            width: 100%;
+            margin-bottom: 20px;
+        }
+
+        .composable-figure {
+            width: 100%;
+        }
+
+        .composable-layout {
+            flex-direction: column;
+        }
+        
+        .composable-inputs {
+            width: 100%;
+            flex-direction: row;
+        }
+        
+        .composable-input-item {
+            width: 50%;
+        }
+        
+        .composable-output {
+            width: 100%;
+            margin-top: 20px;
+        }
+        
+        .scene-item {
+            min-width: 120px;
+            max-width: 120px;
+        }
+        
+        .scene-thumbnail {
+            width: 100px;
+            height: 55px;
+        }
+    }
+    
+    @media (max-width: 480px) {
+        h1 {
+            font-size: 24px;
+            margin-top: 30px;
+        }
+        
+        .author, .author-a {
+            padding: 15px 2px 0;
+            font-size: 14px;
+        }
+        
+        .corresponding-author {
+            font-size: 12px;
+        }
+        
+        .button {
+            font-size: 12px;
+        }
+
+        p {
+            font-size: 15px;
+        }
+        
+        .section-title {
+            font-size: 20px;
+            margin: 40px 0 15px;
+        }
+        
+        .media-caption {
+            font-size: 14px;
+        }
+        
+        header {
+            padding: 60px 0 30px;
+        }
+        
+        .scene-item {
+            min-width: 100px;
+            max-width: 100px;
+        }
+        
+        .scene-thumbnail {
+            width: 80px;
+            height: 45px;
+        }
+        
+        .composable-figure {
+            width: 100%;
+        }
+
+        .composable-inputs {
+            flex-direction: column;
+        }
+        
+        .composable-input-item {
+            width: 100%;
+        }
+    }
+    html {
+        scroll-behavior: smooth;
+    }
+
+    .landing-hero {
+        position: relative;
+        isolation: isolate;
+        min-height: 100vh;
+        min-height: 100svh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        background: #070b12;
+        text-align: center;
+    }
+
+    .landing-backdrop,
+    .landing-video,
+    .landing-shade {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+    }
+
+    .landing-backdrop {
+        z-index: -1;
+        pointer-events: none;
+    }
+
+    .landing-video {
+        display: block;
+        object-fit: cover;
+        opacity: 0;
+        transition: opacity 1.2s ease;
+    }
+
+    .landing-video.is-active {
+        opacity: 1;
+    }
+
+    .landing-shade {
+        background:
+            radial-gradient(ellipse at center, rgba(0, 0, 0, 0.2), rgba(0, 0, 0, 0.48)),
+            linear-gradient(180deg, rgba(0, 0, 0, 0.3), rgba(0, 0, 0, 0.16) 35%, rgba(0, 0, 0, 0.6));
+    }
+
+    .landing-brand {
+        position: absolute;
+        top: 28px;
+        left: clamp(24px, 5vw, 72px);
+        display: block;
+        width: 164px;
+        line-height: 0;
+        transition: opacity 0.2s ease;
+    }
+
+    .landing-brand:hover {
+        opacity: 0.8;
+    }
+
+    .landing-brand img {
+        display: block;
+        width: 100%;
+        height: auto;
+    }
+
+    .landing-content {
+        width: 100%;
+        max-width: 1280px;
+        padding: 130px 24px 100px;
+        color: #fff;
+        text-shadow: 0 3px 24px rgba(0, 0, 0, 0.3);
+    }
+
+    .landing-project {
+        margin: 0 0 24px;
+        font-size: clamp(34px, 7.5vw, 112px);
+        font-weight: 800;
+        line-height: 1.02;
+        letter-spacing: -0.035em;
+    }
+
+    .landing-title {
+        margin: 0 auto;
+        max-width: 1120px;
+        color: #fff;
+        font-size: clamp(22px, 3vw, 48px);
+        font-weight: 400;
+        line-height: 1.18;
+        letter-spacing: -0.015em;
+        text-wrap: balance;
+    }
+
+    .landing-actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 16px;
+        margin-top: 48px;
+    }
+
+    .landing-action,
+    .landing-action:visited {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 144px;
+        padding: 11px 28px;
+        border: 1px solid rgba(255, 255, 255, 0.5);
+        border-radius: 999px;
+        background: rgba(12, 14, 18, 0.25);
+        backdrop-filter: blur(10px);
+        color: #fff;
+        font-size: 16px;
+        font-weight: 600;
+        text-decoration: none;
+        text-shadow: none;
+        transition: transform 0.2s ease, background 0.2s ease;
+    }
+
+    .landing-action:hover {
+        transform: translateY(-2px);
+        background: rgba(255, 255, 255, 0.18);
+    }
+
+    .landing-scroll,
+    .landing-scroll:visited {
+        position: absolute;
+        bottom: max(24px, env(safe-area-inset-bottom));
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 16px;
+        color: rgba(255, 255, 255, 0.8);
+        font-size: 14px;
+        font-weight: 300;
+        line-height: 1.2;
+        letter-spacing: 0.1em;
+        white-space: nowrap;
+        text-decoration: none;
+        transition: color 0.2s ease;
+    }
+
+    .landing-scroll:hover {
+        color: #fff;
+    }
+
+    .landing-brand:focus-visible,
+    .landing-action:focus-visible,
+    .landing-scroll:focus-visible {
+        outline: 2px solid #fff;
+        outline-offset: 6px;
+    }
+
+    @media (max-width: 640px) {
+        .landing-brand {
+            top: 24px;
+            width: 124px;
+        }
+
+        .landing-project {
+            font-size: clamp(34px, 10vw, 62px);
+            margin-bottom: 20px;
+        }
+
+        .landing-title {
+            font-size: clamp(22px, 5.6vw, 30px);
+            line-height: 1.3;
+        }
+
+        .landing-title br {
+            display: none;
+        }
+
+        .landing-actions {
+            margin-top: 32px;
+            gap: 12px;
+        }
+
+        .landing-action {
+            min-width: 120px;
+            padding: 10px 24px;
+            font-size: 15px;
+        }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        html {
+            scroll-behavior: auto;
+        }
+
+        .landing-video,
+        .landing-brand,
+        .landing-action,
+        .landing-scroll {
+            transition: none;
+        }
+    }
+</style>
+</head>
+<body>
+    <section class="landing-hero" id="home" aria-labelledby="landing-project">
+        <div class="landing-backdrop" aria-hidden="true">
+            <video class="landing-video is-active" src="assets/Ironman/WorldAttention.mp4" poster="assets/shot_imgs/ironman-worldattention-shot-1.jpg" autoplay muted loop playsinline preload="auto" tabindex="-1"></video>
+            <video class="landing-video" muted loop playsinline preload="none" tabindex="-1"></video>
+            <div class="landing-shade"></div>
+        </div>
+        <a class="landing-brand" href="#home" aria-label="WorldAttention home — DAMO Academy">
+            <img src="assets/DAMO-white.png" width="1706" height="658" alt="DAMO Alibaba DAMO Academy">
+        </a>
+        <div class="landing-content">
+            <h1 class="landing-project" id="landing-project">WorldAttention</h1>
+            <p class="landing-title">An Efficient Attention Architecture<br> for Interactive Video World Models</p>
+            <div class="landing-actions">
+                <a class="landing-action" href="https://arxiv.org/abs/2600.00000">Paper</a>
+                <a class="landing-action" href="https://github.com/alibaba-damo-academy/WorldAttention">Code</a>
+            </div>
+        </div>
+        <a class="landing-scroll" href="#project">
+            <span>scroll down to explore</span>
+            <svg width="22" height="14" viewBox="0 0 22 14" fill="none" aria-hidden="true">
+                <path d="M4 3.5 11 10.5 18 3.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+        </a>
+    </section>
+    <div class="container" id="project">
+        <header>
+            <h1><b>WorldAttention:</b> An Efficient Attention Architecture for Interactive Video World Models</h1>
+            <h2 class="review-subtitle"><a href="https://openreview.net/forum?id=wlyXfBDlzC" target="_blank" rel="noopener noreferrer">NeurIPS 2026 Reviewed (5/5/5 - Accept/Accept/Accept)</a></h2>
+            <div style="margin-top: 20px;">
+                <div>
+                    <a class="author-a" href="https://steve-zeyu-zhang.github.io/" target="_blank" rel="noopener noreferrer">Zeyu Zhang<sup>1*</sup></a>
+                    <a class="author-a" href="https://github.com/skeletalknight" target="_blank" rel="noopener noreferrer">Jinyuan Mao<sup>2*</sup></a>
+                    <a class="author-a" href="https://github.com/andakai" target="_blank" rel="noopener noreferrer">Dakai An<sup>3*</sup></a>
+                    <a class="author-a" href="https://wangbo-zhao.github.io/" target="_blank" rel="noopener noreferrer">Wangbo Zhao<sup>3</sup></a>
+                    <a class="author-a" href="https://scholar.google.com/citations?user=QJGroC0AAAAJ&amp;hl=en" target="_blank" rel="noopener noreferrer">Hanfeng Lu<sup>3</sup></a>
+                    <a class="author-a" href="https://openreview.net/profile?id=%7EJiasheng_Tang1" target="_blank" rel="noopener noreferrer">Jiasheng Tang<sup>1,4†</sup></a>
+                    <a class="author-a" href="https://scholar.google.com/citations?user=_YgjRn0AAAAJ&amp;hl=en" target="_blank" rel="noopener noreferrer">Yinghao Yu<sup>5</sup></a>
+                    <a class="author-a" href="https://www.cse.ust.hk/~weiwa/" target="_blank" rel="noopener noreferrer">Wei Wang<sup>3</sup></a>
+                    <a class="author-a" href="https://bohanzhuang.github.io/" target="_blank" rel="noopener noreferrer">Bohan Zhuang<sup>1,2†</sup></a>
+                </div>
+                <div>
+                    <span class="author"><sup>1</sup>DAMO Academy, Alibaba Group</span>
+                    <span class="author"><sup>2</sup>Zhejiang University</span>
+                    <span class="author"><sup>3</sup>HKUST</span>
+                    <span class="author"><sup>4</sup>Hupan Lab</span>
+                    <span class="author"><sup>5</sup>TRE, Alibaba Group</span>
+                </div>
+                <div class="author corresponding-author">
+                    <sup>*</sup>Equal contribution. &nbsp;&nbsp; <sup>†</sup>Corresponding authors.
+                </div>
+            </div>
+            <a href="https://arxiv.org/abs/2600.00000" target="_blank" rel="noopener noreferrer" class="button">Paper</a>
+            <a href="https://github.com/alibaba-damo-academy/WorldAttention" target="_blank" rel="noopener noreferrer" class="button">Code</a>
+        </header>
+
+        <p style="margin: 0 auto; text-align: center;">
+            <b>TL;DR</b>: WorldAttention enables efficient interactive video world models through hybrid sparse attention, hierarchical KV caching, and specialized kernels, achieving 22 FPS.
+        </p><br>
+
+        <div class="media-grid" style="width: 70%; margin: 0 auto; text-align: center;">
+            <div class="media-item">
+                <video loop autoplay muted playsinline controls preload="none" src="assets/WorldAttention_promo.mp4" type="video/mp4"></video>
+                <!-- <div class="media-caption">Interactively directing a multi-shot story</div> -->
+            </div>
+        </div>
+
+
+        <div class="section-title" id="ironman-title">Ironman</div>
+
+        <div class="media-grid comparison-grid ironman-grid" aria-labelledby="ironman-title" data-gallery="ironman">
+            <div class="media-item">
+                <h3 class="method-name"><strong>WorldAttention</strong></h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="auto" src="assets/Ironman/WorldAttention.mp4" type="video/mp4" data-shot-5-start="49" data-shot-6-start="53"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Ironman shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">DeepForcing</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="auto" src="assets/Ironman/DeepForcing.mp4" type="video/mp4"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Ironman shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">RollingForcing</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="auto" src="assets/Ironman/RollingForcing.mp4" type="video/mp4"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Ironman shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">SkyReels-V2</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="auto" src="assets/Ironman/SkyReels-V2.mp4" type="video/mp4"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Ironman shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">Infinity-RoPE</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="auto" src="assets/Ironman/Infinity-RoPE.mp4" type="video/mp4"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Ironman shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">LongLive</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="auto" src="assets/Ironman/LongLive.mp4" type="video/mp4"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Ironman shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-title" id="cyberpunk-workshop-title">Cyberpunk Workshop</div>
+
+        <div class="media-grid comparison-grid" aria-labelledby="cyberpunk-workshop-title" data-gallery="cyberpunk-workshop">
+            <div class="media-item">
+                <h3 class="method-name"><strong>WorldAttention</strong></h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/cyberpunk_workshop/WorldAttention.mp4" type="video/mp4" poster="assets/shot_imgs/cyberpunk-workshop-worldattention-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Cyberpunk Workshop shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">DeepForcing</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/cyberpunk_workshop/DeepForcing.mp4" type="video/mp4" poster="assets/shot_imgs/cyberpunk-workshop-deepforcing-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Cyberpunk Workshop shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">RollingForcing</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/cyberpunk_workshop/RollingForcing.mp4" type="video/mp4" poster="assets/shot_imgs/cyberpunk-workshop-rollingforcing-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Cyberpunk Workshop shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">SkyReels-V2</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/cyberpunk_workshop/SkyReels-V2.mp4" type="video/mp4" poster="assets/shot_imgs/cyberpunk-workshop-skyreels-v2-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Cyberpunk Workshop shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">Infinity-RoPE</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/cyberpunk_workshop/Infinity-RoPE.mp4" type="video/mp4" poster="assets/shot_imgs/cyberpunk-workshop-infinity-rope-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Cyberpunk Workshop shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">LongLive</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/cyberpunk_workshop/LongLive.mp4" type="video/mp4" poster="assets/shot_imgs/cyberpunk-workshop-longlive-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Cyberpunk Workshop shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-title" id="poker-title">Poker</div>
+
+        <div class="media-grid comparison-grid" aria-labelledby="poker-title" data-gallery="poker">
+            <div class="media-item">
+                <h3 class="method-name"><strong>WorldAttention</strong></h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/Poker/WorldAttention.mp4" type="video/mp4" poster="assets/shot_imgs/poker-worldattention-shot-1.jpg" data-shot-2-start="14.5" data-shot-3-start="25.5" data-shot-4-start="32" data-shot-5-start="46" data-shot-6-start="55.5"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Poker shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">DeepForcing</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/Poker/DeepForcing.mp4" type="video/mp4" poster="assets/shot_imgs/poker-deepforcing-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Poker shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">RollingForcing</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/Poker/RollingForcing.mp4" type="video/mp4" poster="assets/shot_imgs/poker-rollingforcing-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Poker shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">SkyReels-V2</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/Poker/SkyReels-V2.mp4" type="video/mp4" poster="assets/shot_imgs/poker-skyreels-v2-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Poker shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">Infinity-RoPE</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/Poker/Infinity-RoPE.mp4" type="video/mp4" poster="assets/shot_imgs/poker-infinity-rope-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Poker shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">LongLive</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/Poker/LongLive.mp4" type="video/mp4" poster="assets/shot_imgs/poker-longlive-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Poker shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-title" id="christmas-street-title">Christmas Street</div>
+
+        <div class="media-grid comparison-grid" aria-labelledby="christmas-street-title" data-gallery="christmas-street">
+            <div class="media-item">
+                <h3 class="method-name"><strong>WorldAttention</strong></h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/christmas_street/WorldAttention.mp4" type="video/mp4" poster="assets/shot_imgs/christmas-street-worldattention-shot-1.jpg" data-shot-2-start="20.5" data-shot-3-start="32.5" data-shot-4-start="36" data-shot-5-start="47" data-shot-6-start="56"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Christmas Street shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">DeepForcing</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/christmas_street/DeepForcing.mp4" type="video/mp4" poster="assets/shot_imgs/christmas-street-deepforcing-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Christmas Street shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">RollingForcing</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/christmas_street/RollingForcing.mp4" type="video/mp4" poster="assets/shot_imgs/christmas-street-rollingforcing-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Christmas Street shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">SkyReels-V2</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/christmas_street/SkyReels-V2.mp4" type="video/mp4" poster="assets/shot_imgs/christmas-street-skyreels-v2-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Christmas Street shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">Infinity-RoPE</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/christmas_street/Infinity-RoPE.mp4" type="video/mp4" poster="assets/shot_imgs/christmas-street-infinity-rope-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Christmas Street shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">LongLive</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/christmas_street/LongLive.mp4" type="video/mp4" poster="assets/shot_imgs/christmas-street-longlive-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Christmas Street shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-title" id="stage-dance-title">Stage Dance</div>
+
+        <div class="media-grid comparison-grid" aria-labelledby="stage-dance-title" data-gallery="stage-dance">
+            <div class="media-item">
+                <h3 class="method-name"><strong>WorldAttention</strong></h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/stage_dance/WorldAttention.mp4" type="video/mp4" poster="assets/shot_imgs/stage-dance-worldattention-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Stage Dance shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">DeepForcing</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/stage_dance/DeepForcing.mp4" type="video/mp4" poster="assets/shot_imgs/stage-dance-deepforcing-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Stage Dance shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">RollingForcing</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/stage_dance/RollingForcing.mp4" type="video/mp4" poster="assets/shot_imgs/stage-dance-rollingforcing-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Stage Dance shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">SkyReels-V2</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/stage_dance/SkyReels-V2.mp4" type="video/mp4" poster="assets/shot_imgs/stage-dance-skyreels-v2-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Stage Dance shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">Infinity-RoPE</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/stage_dance/Infinity-RoPE.mp4" type="video/mp4" poster="assets/shot_imgs/stage-dance-infinity-rope-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Stage Dance shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">LongLive</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/stage_dance/LongLive.mp4" type="video/mp4" poster="assets/shot_imgs/stage-dance-longlive-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Stage Dance shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-title" id="workbench-demo-title">Workbench Demo</div>
+
+        <div class="media-grid comparison-grid" aria-labelledby="workbench-demo-title" data-gallery="workbench-demo">
+            <div class="media-item">
+                <h3 class="method-name"><strong>WorldAttention</strong></h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/workbench_demo/WorldAttention.mp4" type="video/mp4" poster="assets/shot_imgs/workbench-demo-worldattention-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Workbench Demo shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">DeepForcing</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/workbench_demo/DeepForcing.mp4" type="video/mp4" poster="assets/shot_imgs/workbench-demo-deepforcing-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Workbench Demo shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">RollingForcing</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/workbench_demo/RollingForcing.mp4" type="video/mp4" poster="assets/shot_imgs/workbench-demo-rollingforcing-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Workbench Demo shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">SkyReels-V2</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/workbench_demo/SkyReels-V2.mp4" type="video/mp4" poster="assets/shot_imgs/workbench-demo-skyreels-v2-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Workbench Demo shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">Infinity-RoPE</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/workbench_demo/Infinity-RoPE.mp4" type="video/mp4" poster="assets/shot_imgs/workbench-demo-infinity-rope-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Workbench Demo shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+            <div class="media-item">
+                <h3 class="method-name">LongLive</h3>
+                <div class="image-container">
+                    <div class="video-container">
+                        <div class="video-player-section">
+                            <video loop autoplay muted playsinline controls preload="metadata" data-src="assets/workbench_demo/LongLive.mp4" type="video/mp4" poster="assets/shot_imgs/workbench-demo-longlive-shot-1.jpg"></video>
+                        </div>
+                        
+                        <div class="scenes-list" aria-label="Workbench Demo shot prompts"></div>
+                        
+                        <div class="video-controls">
+                            <div class="video-timeline">
+                                <div class="video-progress"></div>
+                            </div>
+                            <div class="video-time">0:00 / 0:00</div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <section id="method" aria-labelledby="method-title">
+            <h2 class="section-title" id="method-title">Method</h2>
+
+            <figure class="method-figure">
+                <a href="assets/Figure-1.png" aria-label="View the overall WorldAttention architecture at full resolution">
+                    <img src="assets/Figure-1.png" width="4349" height="1681" loading="lazy" alt="WorldAttention overall architecture combining Hierarchical KV Cache retrieval and Hybrid Sparse Attention.">
+                </a>
+                <figcaption><strong>Overall architecture of WorldAttention.</strong> We propose a system-oriented co-design using Hierarchical KV Cache (HKV) for coarse-to-fine memory retrieval, and Hybrid Sparse Attention (HSA) for efficient dual-branch attention computation.</figcaption>
+            </figure>
+
+            <figure class="method-figure">
+                <a href="assets/Figure-3.png" aria-label="View the hierarchical KV cache architecture at full resolution">
+                    <img src="assets/Figure-3.png" width="3999" height="2250" loading="lazy" alt="WorldAttention three-tier hierarchical KV cache with prompt-level and page-level retrieval.">
+                </a>
+                <figcaption>Overview of the WorldAttention architecture featuring a three-tier hierarchical KV cache and a two-stage (prompt-level and page-level) retrieval mechanism for efficient long-video generation.</figcaption>
+            </figure>
+        </section>
+
+        <hr style="margin-top: 3rem;">
+        <footer class="footer">
+            <div class="container">
+                <div class="has-text-centered">
+                   
+                    <p>
+                        <b>WorldAttention:</b> An Efficient Attention Architecture for Interactive Video World Models
+                    </p>
+                </div>
+            </div>
+        </footer>
+
+
+
+    </div>
+    
+    <script id="gallery-prompt-data" type="application/json">
+{
+    "galleries": [
+        {
+            "key": "ironman",
+            "title": "Ironman",
+            "folder": "Ironman",
+            "source": "assets/Ironman/ironman.jsonl",
+            "prompts": [
+                "Iron Man walks through a war-torn, crumbling urban ruin at dusk, then stops and stands still. Wide shot to medium close-up.",
+                "A hail of bullets tears in. Iron Man raises his arm, rounds and shells streak past. Wide shot to medium close-up.",
+                "Emerald-green beams sweep down the street. Wide shot to medium close-up.",
+                "Iron Man aims and fires tight, pulsed red repulsor blasts from his palm. Wide shot to medium close-up.",
+                "The chest arc reactor unleashes a colossal blue beam. Wide shot to medium close-up.",
+                "A dark alien craft enters from the left and cruises across. Iron Man looks up, trying to find the alien craft. Wide shot to medium close-up."
+            ],
+            "labels": [
+                "Walk through ruins",
+                "Incoming bullets",
+                "Green beams",
+                "Red palm blasts",
+                "Blue chest beam",
+                "Alien craft"
+            ]
+        },
+        {
+            "key": "cyberpunk-workshop",
+            "title": "Cyberpunk Workshop",
+            "folder": "cyberpunk_workshop",
+            "source": "assets/cyberpunk_workshop/cyberpunk_workshop.jsonl",
+            "prompts": [
+                "A medium close-up in a cyberpunk workshop: a hacker wearing sunglasses and a hoodie types at flickering monitors. Neon shadows rake across a cluttered workbench as streams of code slide across the screens. Medium close-up.",
+                "The same cyberpunk workshop setup remains in a medium close-up. The same hacker in sunglasses and a hoodie pauses, leans back, and rubs their eyes while the monitors keep strobing with code and neon light flickers across the cluttered bench. Medium close-up.",
+                "The same medium close-up holds on the hacker at the flickering monitors. A small red alert begins blinking on one screen, and the hacker's focus snaps toward it as code continues streaming through the neon-lit workshop. Medium close-up.",
+                "The same cyberpunk workshop scene continues. The hacker's hand hesitates over a red EXECUTE button, then presses it decisively while the monitors flicker and neon shadows cut across the cluttered workbench. Medium close-up.",
+                "The same medium close-up stays in the cyberpunk workshop. A nearby device's LED flashes confirmation, and the hacker glances over toward it while the monitors continue strobing and code streams by. Medium close-up.",
+                "The same hacker remains in the neon-lit workshop as a second device erupts in rapid beeps. They pivot toward it, calm and intent, while flickering monitors and scrolling code light the cluttered bench. Medium close-up."
+            ],
+            "labels": [
+                "Typing code",
+                "Rubbing eyes",
+                "Red alert",
+                "Press EXECUTE",
+                "LED confirmation",
+                "Device beeps"
+            ]
+        },
+        {
+            "key": "poker",
+            "title": "Poker",
+            "folder": "Poker",
+            "source": "assets/Poker/prompt_interactive_example.jsonl",
+            "prompts": [
+                "A realistic video of a Texas Hold'em poker game in a casino. A late-30s male player with short dark hair and light stubble, wearing a navy blazer, charcoal tee, dark jeans, and a stainless-steel watch, sits at a well-lit poker table holding his cards close. Colorful chips are spread across the felt, the dealer deals steadily, and slot machines glow in the background. Wide shot to medium close-up.",
+                "At the same poker table, the same player throws his cards onto the felt and leans back in his chair, arms opening as the action ends. The dealer continues dealing and the table remains busy with chips and players. Wide shot to medium close-up.",
+                "Moments later, the same player reveals the winning hand on the table and stays leaned back confidently. A nearby patron claps while the dealer moves the game forward. Casino tables and slot machines fill the background. Wide shot to medium close-up.",
+                "After the result, the same player sits forward and stacks his chips neatly, aligning the piles with steady hand movements. The dealer begins the next round as the casino lights flicker softly behind. Wide shot to medium close-up.",
+                "The same player pauses and looks over his organized chips, showing a small, satisfied smile. The table stays active and well lit. Wide shot to medium close-up.",
+                "To finish the sequence, the same player turns and exchanges a celebratory high-five with a nearby patron. Brief cheers rise as the dealer keeps dealing and the casino continues around them. Wide shot to medium close-up."
+            ],
+            "labels": [
+                "Holding cards",
+                "Throwing cards",
+                "Winning hand",
+                "Stacking chips",
+                "Satisfied smile",
+                "High-five"
+            ]
+        },
+        {
+            "key": "christmas-street",
+            "title": "Christmas Street",
+            "folder": "christmas_street",
+            "source": "assets/christmas_street/christmas_street.jsonl",
+            "prompts": [
+                "A realistic vibrant Christmas street scene in Rio de Janeiro with colorful holiday lights, festive decorations, palm trees, tall buildings, and locals dressed in summer clothes. At the center, a slightly overweight Black man in a blue shirt holds a small red ball. Christ the Redeemer peeks in the distance, and a warm golden glow fills the scene. Wide shot to medium close-up.",
+                "The same vibrant Christmas street in Rio de Janeiro remains full of colorful lights, festive decor, palm trees, tall buildings, and locals in summer wear. The same slightly overweight Black man in a blue shirt tosses the small red ball into the air, drawing a small crowd of kids and adults around him. Christ the Redeemer is still visible in the distance under the warm golden glow. Wide shot to medium close-up.",
+                "The same performer in the blue shirt switches from the red ball to long ribbon streamers on the lively Christmas street. He twirls colorful ribbons through the warm golden air as kids and adults gather closer, cheering amid holiday lights, festive decorations, palm trees, and tall buildings, with Christ the Redeemer still peeking in the distance. Wide shot to medium close-up.",
+                "The same slightly overweight Black man in the blue shirt now performs with a flaming torch on the vibrant Christmas street. The crowd's excitement surges as the torch flame flickers against colorful holiday lights and festive decor, with palm trees, tall buildings, summer-dressed locals, and Christ the Redeemer in the distance. Wide shot to medium close-up.",
+                "The same street performer balances the flaming torch carefully on his chin while standing at the center of the Christmas street. Children press closer with wide-eyed wonder as adults cheer behind them, surrounded by colorful lights, festive decorations, palm trees, tall buildings, and the warm golden glow of Rio with Christ the Redeemer in the distance. Wide shot to medium close-up.",
+                "The same slightly overweight Black man in the blue shirt twirls the flaming torch between his fingers as applause rolls through the audience. Kids and adults cheer on the vibrant Christmas street, framed by colorful holiday lights, festive decor, palm trees, tall buildings, summer clothes, a warm golden glow, and Christ the Redeemer peeking in the distance. Wide shot to medium close-up."
+            ],
+            "labels": [
+                "Red ball",
+                "Ball toss",
+                "Ribbon twirls",
+                "Flaming torch",
+                "Chin balance",
+                "Torch twirls"
+            ]
+        },
+        {
+            "key": "stage-dance",
+            "title": "Stage Dance",
+            "folder": "stage_dance",
+            "source": "assets/stage_dance/stage_dance.jsonl",
+            "prompts": [
+                "Medium close-up: a young white woman in a flowing, sequined gown performs a graceful song-and-dance on a warmly lit stage with swaying curtains behind her. Medium close-up.",
+                "The same stage setup continues as she leaps with her arms extended overhead, and the camera follows her fluid rise under the warm light. Medium close-up.",
+                "The same dancer lands softly, opening her arms as if embracing the stage, while her movement remains smooth and poised in front of the swaying curtains. Medium close-up.",
+                "The same warm stage remains in view as a spotlight slides down to her feet, revealing crisp, rhythmic steps beneath the flowing sequined gown. Medium close-up.",
+                "The same dancer twirls gracefully; her skirt catches the stage light as the spotlight beam tracks her turning feet. Medium close-up.",
+                "The same young woman settles under the warm glow and offers a radiant smile, full of poise and passion, with the curtains swaying softly behind her. Medium close-up."
+            ],
+            "labels": [
+                "Song and dance",
+                "Arms-up leap",
+                "Soft landing",
+                "Rhythmic steps",
+                "Graceful twirl",
+                "Radiant smile"
+            ]
+        },
+        {
+            "key": "workbench-demo",
+            "title": "Workbench Demo",
+            "folder": "workbench_demo",
+            "source": "assets/workbench_demo/workbench_demo.jsonl",
+            "prompts": [
+                "Medium close-up, static shot: a young white woman in a blue work coat and white apron, with a curly brown ponytail, lifts a tool from a tidy, well-lit workbench and smiles to the camera in greeting. Medium close-up, static shot.",
+                "The same young woman in the blue work coat and white apron tightens a screw with the tool, then shows the result to the camera with a satisfied nod. The tidy, well-lit workbench remains in the background. Medium close-up, static shot.",
+                "The same woman wipes her hands on a rag and gestures proudly toward the finished piece on the neat workbench, still framed in the same bright workshop setting. Medium close-up, static shot.",
+                "Still smiling, the same young woman picks up a small hammer from the tidy workbench to demonstrate the next step, her curly brown ponytail visible above the white apron. Medium close-up, static shot.",
+                "The same woman gently taps a nail into wood with steady, careful strikes. Her curly brown ponytail sways slightly as she works at the clean, well-lit workbench. Medium close-up, static shot.",
+                "Leaning closer to the camera with bright eyes, the same young woman offers a proud, friendly smile while the small hammer rests in her hand beside the finished piece. Medium close-up, static shot."
+            ],
+            "labels": [
+                "Tool greeting",
+                "Tighten screw",
+                "Finished piece",
+                "Pick up hammer",
+                "Tap nail",
+                "Proud smile"
+            ]
+        }
+    ]
+}
+    </script>
+    <script>
+        document.addEventListener('DOMContentLoaded', async () => {
+            const galleries = JSON.parse(document.getElementById('gallery-prompt-data').textContent).galleries;
+            const players = [...document.querySelectorAll('.comparison-grid .video-container')];
+            const tooltip = document.createElement('div');
+            tooltip.id = 'shot-prompt-tooltip';
+            tooltip.className = 'prompt-tooltip';
+            tooltip.setAttribute('role', 'tooltip');
+            tooltip.hidden = true;
+            const tooltipTitle = document.createElement('strong');
+            const tooltipText = document.createElement('p');
+            tooltip.append(tooltipTitle, tooltipText);
+            document.body.append(tooltip);
+            let activeItem = null;
+
+            const positionTooltip = (x, y) => {
+                const gap = 16;
+                const edge = 12;
+                const bounds = tooltip.getBoundingClientRect();
+                let left = x + gap;
+                let top = y + gap;
+                if (left + bounds.width > innerWidth - edge) left = x - bounds.width - gap;
+                if (top + bounds.height > innerHeight - edge) top = y - bounds.height - gap;
+                tooltip.style.left = `${Math.max(edge, Math.min(left, innerWidth - bounds.width - edge))}px`;
+                tooltip.style.top = `${Math.max(edge, Math.min(top, innerHeight - bounds.height - edge))}px`;
+            };
+
+            const hideTooltip = () => {
+                if (activeItem) activeItem.removeAttribute('aria-describedby');
+                activeItem = null;
+                tooltip.hidden = true;
+            };
+
+            const showTooltip = (item, prompt, shot, x, y) => {
+                if (activeItem && activeItem !== item) activeItem.removeAttribute('aria-describedby');
+                activeItem = item;
+                tooltipTitle.textContent = `Shot ${shot}`;
+                tooltipText.textContent = prompt;
+                item.setAttribute('aria-describedby', tooltip.id);
+                tooltip.hidden = false;
+                positionTooltip(x, y);
+            };
+
+            const shotStart = (video, index, count) => {
+                const duration = Number.isFinite(video.duration) ? video.duration : 0;
+                const override = video.getAttribute(`data-shot-${index + 1}-start`);
+                if (override !== null && Number.isFinite(Number(override))) {
+                    return Math.max(0, Math.min(duration, Number(override)));
+                }
+                return index * duration / count;
+            };
+
+            const renderPrompts = (gallery, prompts) => {
+                hideTooltip();
+                const shortLabels = new Map(gallery.prompts.map((prompt, index) => [prompt, gallery.labels[index]]));
+                const grid = document.querySelector(`[data-gallery="${gallery.key}"]`);
+                grid.querySelectorAll('.video-container').forEach(player => {
+                    const list = player.querySelector('.scenes-list');
+                    const video = player.querySelector('video');
+                    const method = (video.getAttribute('src') || video.dataset.src).split('/').pop().replace(/\.mp4$/i, '').toLowerCase();
+                    const methodName = player.closest('.media-item').querySelector('.method-name').textContent;
+                    list.replaceChildren();
+                    prompts.forEach((prompt, index) => {
+                        const item = document.createElement('button');
+                        item.type = 'button';
+                        item.className = 'scene-item';
+                        const thumbnail = document.createElement('span');
+                        thumbnail.className = 'scene-thumbnail';
+                        const image = document.createElement('img');
+                        image.src = `assets/shot_imgs/${gallery.key}-${method}-shot-${index + 1}.jpg`;
+                        image.alt = `${methodName}, Shot ${index + 1}`;
+                        image.loading = 'lazy';
+                        image.decoding = 'async';
+                        thumbnail.append(image);
+                        const shot = document.createElement('span');
+                        shot.className = 'scene-title';
+                        shot.textContent = `Shot ${index + 1}`;
+                        const summary = document.createElement('span');
+                        summary.className = 'scene-description';
+                        summary.textContent = shortLabels.get(prompt) || prompt.split(/[.!?]/)[0].split(/\s+/).slice(0, 4).join(' ');
+                        item.append(thumbnail, shot, summary);
+                        item.addEventListener('pointerenter', event => showTooltip(item, prompt, index + 1, event.clientX, event.clientY));
+                        item.addEventListener('pointermove', event => {
+                            if (activeItem === item) positionTooltip(event.clientX, event.clientY);
+                            else showTooltip(item, prompt, index + 1, event.clientX, event.clientY);
+                        });
+                        item.addEventListener('pointerleave', () => {
+                            if (activeItem === item) hideTooltip();
+                        });
+                        item.addEventListener('focus', () => {
+                            const bounds = item.getBoundingClientRect();
+                            showTooltip(item, prompt, index + 1, bounds.left, bounds.bottom);
+                        });
+                        item.addEventListener('blur', () => {
+                            if (activeItem === item) hideTooltip();
+                        });
+                        item.addEventListener('click', event => {
+                            const seek = () => {
+                                if (!Number.isFinite(video.duration) || video.duration <= 0) return;
+                                video.currentTime = shotStart(video, index, prompts.length);
+                                video.play().catch(() => {});
+                            };
+                            if (video.readyState >= 1) seek();
+                            else video.addEventListener('loadedmetadata', seek, { once: true });
+                            const bounds = item.getBoundingClientRect();
+                            showTooltip(item, prompt, index + 1, event.detail ? event.clientX : bounds.left, event.detail ? event.clientY : bounds.bottom);
+                        });
+                        list.append(item);
+                    });
+                    video.dispatchEvent(new Event('timeupdate'));
+                });
+            };
+
+            document.addEventListener('keydown', event => {
+                if (event.key === 'Escape') hideTooltip();
+            });
+            document.addEventListener('pointerdown', event => {
+                if (activeItem && !activeItem.contains(event.target)) hideTooltip();
+            });
+            window.addEventListener('scroll', () => {
+                if (!activeItem || activeItem.matches(':hover')) return;
+                if (activeItem === document.activeElement) {
+                    const bounds = activeItem.getBoundingClientRect();
+                    if (bounds.bottom < 0 || bounds.top > innerHeight) hideTooltip();
+                    else positionTooltip(bounds.left, bounds.bottom);
+                } else hideTooltip();
+            });
+            window.addEventListener('resize', hideTooltip);
+
+            const formatTime = seconds => {
+                const safe = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+                return `${Math.floor(safe / 60)}:${Math.floor(safe % 60).toString().padStart(2, '0')}`;
+            };
+
+            players.forEach(player => {
+                const video = player.querySelector('video');
+                const progress = player.querySelector('.video-progress');
+                const timeline = player.querySelector('.video-timeline');
+                const time = player.querySelector('.video-time');
+                const list = player.querySelector('.scenes-list');
+                let currentShot = -1;
+                const update = () => {
+                    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+                    progress.style.width = `${duration ? Math.min(100, video.currentTime / duration * 100) : 0}%`;
+                    time.textContent = `${formatTime(video.currentTime)} / ${formatTime(duration)}`;
+                    const items = [...list.children];
+                    if (!duration || !items.length) return;
+                    const index = items.reduce((active, item, position) =>
+                        video.currentTime >= shotStart(video, position, items.length) ? position : active, 0);
+                    items.forEach((item, position) => {
+                        item.classList.toggle('active', position === index);
+                        if (position === index) item.setAttribute('aria-current', 'true');
+                        else item.removeAttribute('aria-current');
+                    });
+                    if (index !== currentShot && !list.matches(':hover, :focus-within')) {
+                        const bounds = items[index].getBoundingClientRect();
+                        const viewport = list.getBoundingClientRect();
+                        if (bounds.left < viewport.left || bounds.right > viewport.right) {
+                            list.scrollTo({ left: list.scrollLeft + bounds.left - viewport.left - 5, behavior: 'smooth' });
+                        }
+                    }
+                    currentShot = index;
+                };
+                ['loadedmetadata', 'durationchange', 'timeupdate', 'emptied'].forEach(name => video.addEventListener(name, update));
+                timeline.addEventListener('click', event => {
+                    if (!Number.isFinite(video.duration) || video.duration <= 0) return;
+                    const bounds = timeline.getBoundingClientRect();
+                    const ratio = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width));
+                    video.currentTime = ratio * video.duration;
+                    video.play().catch(() => {});
+                });
+                update();
+            });
+
+            const loadVideo = video => {
+                if (video.dataset.src) {
+                    video.src = video.dataset.src;
+                    delete video.dataset.src;
+                    video.load();
+                }
+                video.play().catch(() => {});
+            };
+            const lazyVideos = players.map(player => player.querySelector('video')).filter(video => video.dataset.src);
+            if ('IntersectionObserver' in window) {
+                const observer = new IntersectionObserver(entries => {
+                    entries.forEach(entry => {
+                        if (entry.isIntersecting) {
+                            loadVideo(entry.target);
+                            observer.unobserve(entry.target);
+                        }
+                    });
+                }, { rootMargin: '240px 0px' });
+                lazyVideos.forEach(video => observer.observe(video));
+            } else lazyVideos.forEach(loadVideo);
+
+            await Promise.all(galleries.map(async gallery => {
+                renderPrompts(gallery, gallery.prompts);
+                if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
+                try {
+                    const response = await fetch(gallery.source);
+                    if (!response.ok) return;
+                    const records = (await response.text()).split(/\r?\n/).filter(line => line.trim()).map(line => JSON.parse(line));
+                    const prompts = records.flatMap(record => Array.isArray(record.prompts) ? record.prompts : []).filter(prompt => typeof prompt === 'string' && prompt.trim());
+                    if (prompts.length && JSON.stringify(prompts) !== JSON.stringify(gallery.prompts)) renderPrompts(gallery, prompts);
+                } catch (_) {
+                    // Embedded prompts also support opening the page directly from disk.
+                }
+            }));
+        });
+    </script>
+    <!-- Use LaTeX -->
+    <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+    <!-- Use same tab for click on links-->
+    <script>
+        document.addEventListener("DOMContentLoaded", () => {
+          document.querySelectorAll("a[target='_blank']").forEach(link => {
+            link.removeAttribute("target");
+          });
+        });
+    </script>
+      
+    <script id="landing-player">
+        (() => {
+            const hero = document.querySelector('.landing-hero');
+            const videos = [...hero.querySelectorAll('.landing-video')];
+            const clips = [
+                { src: 'assets/Ironman/WorldAttention.mp4', start: 0 },
+                { src: 'assets/cyberpunk_workshop/WorldAttention.mp4', start: 20 },
+                { src: 'assets/Poker/WorldAttention.mp4', start: 14.5 },
+                { src: 'assets/christmas_street/WorldAttention.mp4', start: 32.5 },
+                { src: 'assets/stage_dance/WorldAttention.mp4', start: 20 },
+                { src: 'assets/workbench_demo/WorldAttention.mp4', start: 20 }
+            ];
+            const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+            let active = videos[0];
+            let standby = videos[1];
+            let current = 0;
+            let visible = true;
+            let switching = false;
+            let timer;
+
+            videos.forEach(video => { video.muted = true; });
+            const canPlay = () => visible && !document.hidden && !reducedMotion.matches;
+            const schedule = () => {
+                clearTimeout(timer);
+                if (canPlay() && !switching) timer = setTimeout(advance, 9000);
+            };
+
+            const prepare = (video, clip) => new Promise(resolve => {
+                const events = ['loadeddata', 'canplay', 'seeked'];
+                const finish = success => {
+                    clearTimeout(timeout);
+                    events.forEach(event => video.removeEventListener(event, ready));
+                    video.removeEventListener('loadedmetadata', seek);
+                    video.removeEventListener('error', failed);
+                    resolve(success);
+                };
+                const ready = () => {
+                    if (video.readyState >= 2 && !video.seeking) finish(true);
+                };
+                const seek = () => { video.currentTime = clip.start; };
+                const failed = () => finish(false);
+                const timeout = setTimeout(failed, 12000);
+                events.forEach(event => video.addEventListener(event, ready));
+                video.addEventListener('loadedmetadata', seek, { once: true });
+                video.addEventListener('error', failed, { once: true });
+                video.preload = 'auto';
+                video.src = clip.src;
+                video.load();
+            });
+
+            async function advance() {
+                if (!canPlay() || switching) return;
+                switching = true;
+                try {
+                    let next = current;
+                    let ready = false;
+                    for (let offset = 1; offset < clips.length && canPlay(); offset++) {
+                        next = (current + offset) % clips.length;
+                        ready = await prepare(standby, clips[next]);
+                        if (ready) break;
+                    }
+                    if (!ready || !canPlay()) return;
+                    await standby.play();
+                    if (!canPlay()) {
+                        standby.pause();
+                        return;
+                    }
+                    const outgoing = active;
+                    standby.classList.add('is-active');
+                    outgoing.classList.remove('is-active');
+                    active = standby;
+                    standby = outgoing;
+                    current = next;
+                    setTimeout(() => outgoing.pause(), 1200);
+                } catch (_) {
+                    // Keep the current scene visible if the next video cannot play.
+                } finally {
+                    switching = false;
+                    schedule();
+                }
+            }
+
+            const updatePlayback = () => {
+                clearTimeout(timer);
+                if (canPlay()) {
+                    active.play().catch(() => {});
+                    schedule();
+                } else {
+                    videos.forEach(video => video.pause());
+                }
+            };
+
+            if ('IntersectionObserver' in window) {
+                new IntersectionObserver(entries => {
+                    visible = entries[0].isIntersecting;
+                    updatePlayback();
+                }, { threshold: 0 }).observe(hero);
+            }
+            document.addEventListener('visibilitychange', updatePlayback);
+            reducedMotion.addEventListener('change', updatePlayback);
+            updatePlayback();
+        })();
+    </script>
+</body>
+</html>
