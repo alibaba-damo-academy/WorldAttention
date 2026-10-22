@@ -48,6 +48,7 @@ _We propose a system-oriented co-design using Hierarchical KV Cache (HKV) for co
 - [x] Release the paper on arXiv
 - [x] Build the project page
 - [x] Release the core code
+- [x] Release interactive data 160 samples
 - [ ] Release the inference pipeline
 - [ ] Release the HSA kernels
 - [ ] Release the visualization script
